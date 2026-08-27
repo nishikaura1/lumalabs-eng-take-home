@@ -3,6 +3,7 @@ import {
   attachTelegramMessage,
   claimQueuedProducts,
   createGeneration,
+  getRecentRejectReasons,
   markProductStatus,
   type Product,
 } from "./db/index.js";
@@ -12,7 +13,10 @@ import { sendGeneratedShot } from "./telegram/bot.js";
 
 /** One pass: claim queued products, generate N variants each, post for approval. */
 export async function runWorkerTick(): Promise<void> {
-  const products = await claimQueuedProducts(config.worker.batchSize);
+  const products = await claimQueuedProducts(
+    config.worker.batchSize,
+    config.worker.maxPendingReviews,
+  );
   if (products.length === 0) return;
 
   console.log(`[worker] claimed ${products.length} product(s)`);
@@ -21,10 +25,20 @@ export async function runWorkerTick(): Promise<void> {
 
 async function processProduct(product: Product): Promise<void> {
   try {
+    // If this SKU has been through a rejected round before (i.e. this run
+    // is via /redo), fold Ellie's reasons in as negative guidance instead
+    // of blindly repeating the same shot — this is the feedback loop for
+    // unapproved images.
+    const priorRejectReasons = await getRecentRejectReasons(product.sku);
+    const prompt =
+      priorRejectReasons.length > 0
+        ? `${product.shot_idea}. Avoid: ${priorRejectReasons.join(", ")}.`
+        : product.shot_idea;
+
     for (let variant = 1; variant <= config.worker.variantsPerRequest; variant++) {
       const gen = await generateStyledShot({
         photoUrl: product.photo_url,
-        prompt: product.shot_idea,
+        prompt,
       });
 
       const imgRes = await fetch(gen.outputUrl);

@@ -28,7 +28,14 @@ export const config = {
   worker: {
     pollIntervalMs: Number(process.env.WORKER_POLL_INTERVAL_MS ?? 15_000),
     batchSize: Number(process.env.WORKER_BATCH_SIZE ?? 3),
-    variantsPerRequest: Number(process.env.VARIANTS_PER_REQUEST ?? 2),
+    // Matches APPROVALS_NEEDED (3) so a clean pass can finish a product
+    // without a /redo round-trip; still ~$0.13/product on uni-1.
+    variantsPerRequest: Number(process.env.VARIANTS_PER_REQUEST ?? 3),
+    // Backlog control: stop pulling new work once this many products are
+    // sitting awaiting_approval. Protects budget from outrunning Ellie's
+    // review pace on a big drop (e.g. the 40-product test) — see
+    // claimQueuedProducts in db/index.ts.
+    maxPendingReviews: Number(process.env.WORKER_MAX_PENDING_REVIEWS ?? 15),
   },
   port: Number(process.env.PORT ?? 3000),
 };

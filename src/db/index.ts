@@ -48,10 +48,14 @@ export interface Generation {
   s3_key: string | null;
   telegram_message_id: number | null;
   decision: "pending" | "approved" | "rejected";
+  reject_reason: string | null;
   cost_usd: string | null;
 }
 
-const APPROVALS_NEEDED = 2;
+// README: "Done" = 2-3 approved images. We take the ceiling — cheaper to
+// generate one extra variant up front (see config.worker.variantsPerRequest)
+// than to round-trip a /redo for the third shot.
+export const APPROVALS_NEEDED = 3;
 
 /** Upsert a row from a CSV import. Returns true if this row needs (re)generation. */
 export async function upsertProductFromImport(row: {
@@ -114,17 +118,40 @@ export async function upsertProductFromImport(row: {
   return { enqueued: shouldEnqueue };
 }
 
-/** Atomically claim up to `limit` queued products so two worker ticks never double-process. */
-export async function claimQueuedProducts(limit: number): Promise<Product[]> {
+/**
+ * Atomically claim up to `limit` queued products so two worker ticks never
+ * double-process — but throttled by `maxPendingReviews`: if Ellie already has
+ * that many awaiting_approval, we stop pulling more work rather than
+ * generating (and spending) further ahead of what she can review. This is
+ * the actual backlog control — a big CSV drop drains at review pace, not
+ * at API throughput, and nothing generates that nobody's looked at yet.
+ */
+export async function claimQueuedProducts(
+  limit: number,
+  maxPendingReviews: number,
+): Promise<Product[]> {
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
+
+    const { rows: pendingRows } = await client.query<{ count: string }>(
+      `SELECT count(*) FROM products WHERE status = 'awaiting_approval'`,
+    );
+    const currentlyPending = Number(pendingRows[0].count);
+    const room = Math.max(0, maxPendingReviews - currentlyPending);
+    const effectiveLimit = Math.min(limit, room);
+
+    if (effectiveLimit === 0) {
+      await client.query("COMMIT");
+      return [];
+    }
+
     const { rows } = await client.query<Product>(
       `SELECT * FROM products WHERE status = 'queued'
        ORDER BY updated_at ASC
        LIMIT $1
        FOR UPDATE SKIP LOCKED`,
-      [limit],
+      [effectiveLimit],
     );
     if (rows.length > 0) {
       await client.query(
@@ -194,10 +221,11 @@ export async function getGeneration(id: number): Promise<Generation | null> {
 export async function decideGeneration(
   id: number,
   decision: "approved" | "rejected",
+  rejectReason?: string,
 ): Promise<{ sku: string; approvedCount: number }> {
   const { rows } = await pool.query<{ sku: string }>(
-    `UPDATE generations SET decision = $2, decided_at = now() WHERE id = $1 RETURNING sku`,
-    [id, decision],
+    `UPDATE generations SET decision = $2, decided_at = now(), reject_reason = $3 WHERE id = $1 RETURNING sku`,
+    [id, decision, rejectReason ?? null],
   );
   const sku = rows[0].sku;
 
@@ -224,6 +252,17 @@ export async function decideGeneration(
   return { sku, approvedCount };
 }
 
+/** Distinct reject reasons from this product's last round, for prompt guidance on /redo. */
+export async function getRecentRejectReasons(sku: string): Promise<string[]> {
+  const { rows } = await pool.query<{ reject_reason: string }>(
+    `SELECT DISTINCT reject_reason FROM generations
+     WHERE sku = $1 AND decision = 'rejected' AND reject_reason IS NOT NULL
+     ORDER BY reject_reason`,
+    [sku],
+  );
+  return rows.map((r) => r.reject_reason);
+}
+
 export async function requeueProduct(sku: string): Promise<boolean> {
   const { rowCount } = await pool.query(
     `UPDATE products SET status = 'queued', error_message = NULL, updated_at = now()
@@ -240,6 +279,70 @@ export async function statusCounts(): Promise<Record<string, number>> {
   const out: Record<string, number> = {};
   for (const r of rows) out[r.status] = Number(r.count);
   return out;
+}
+
+export interface Metrics {
+  totalGenerated: number;
+  approved: number;
+  rejected: number;
+  pending: number;
+  approvalRate: number | null; // of decided (approved+rejected), not pending
+  totalSpendUsd: number;
+  costPerApprovedUsd: number | null;
+  topRejectReasons: { reason: string; count: number }[];
+}
+
+/**
+ * This is our answer to "how do we test the gate that decides what gets
+ * shown" — we don't have a pre-screen model, so the approve/reject stream
+ * itself *is* the eval, and this is how we read it: approval rate and $/approved
+ * as the headline numbers, reject reasons to see *why* the gate is missing.
+ * Surfaced via /status. See APPROACH.md for the pilot-batch process this feeds.
+ */
+export async function getMetrics(): Promise<Metrics> {
+  const { rows } = await pool.query<{
+    decision: string;
+    count: string;
+    cost_sum: string | null;
+  }>(
+    `SELECT decision, count(*), sum(cost_usd) as cost_sum FROM generations GROUP BY decision`,
+  );
+
+  let approved = 0;
+  let rejected = 0;
+  let pending = 0;
+  let totalSpendUsd = 0;
+  for (const r of rows) {
+    const n = Number(r.count);
+    totalSpendUsd += Number(r.cost_sum ?? 0);
+    if (r.decision === "approved") approved = n;
+    else if (r.decision === "rejected") rejected = n;
+    else pending = n;
+  }
+  const decided = approved + rejected;
+
+  const { rows: reasonRows } = await pool.query<{
+    reject_reason: string;
+    count: string;
+  }>(
+    `SELECT reject_reason, count(*) FROM generations
+     WHERE decision = 'rejected' AND reject_reason IS NOT NULL
+     GROUP BY reject_reason ORDER BY count(*) DESC LIMIT 5`,
+  );
+
+  return {
+    totalGenerated: approved + rejected + pending,
+    approved,
+    rejected,
+    pending,
+    approvalRate: decided > 0 ? approved / decided : null,
+    totalSpendUsd,
+    costPerApprovedUsd: approved > 0 ? totalSpendUsd / approved : null,
+    topRejectReasons: reasonRows.map((r) => ({
+      reason: r.reject_reason,
+      count: Number(r.count),
+    })),
+  };
 }
 
 export async function allProductsForExport(): Promise<

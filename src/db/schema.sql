@@ -26,6 +26,10 @@ CREATE TABLE IF NOT EXISTS generations (
   telegram_message_id BIGINT,
   -- pending | approved | rejected
   decision            TEXT NOT NULL DEFAULT 'pending',
+  -- Only set on rejection; see decideGeneration. Feeds the negative guidance
+  -- appended to the prompt on the next /redo, so a reject actually teaches
+  -- the next attempt instead of repeating blindly.
+  reject_reason        TEXT,
   cost_usd            NUMERIC(10, 4),
   created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
   decided_at          TIMESTAMPTZ
@@ -33,3 +37,6 @@ CREATE TABLE IF NOT EXISTS generations (
 
 CREATE INDEX IF NOT EXISTS idx_generations_sku ON generations(sku);
 CREATE INDEX IF NOT EXISTS idx_products_status ON products(status);
+
+-- Additive, idempotent migrations for columns added after the first deploy.
+ALTER TABLE generations ADD COLUMN IF NOT EXISTS reject_reason TEXT;

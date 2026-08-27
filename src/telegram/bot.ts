@@ -3,11 +3,23 @@ import { config } from "../config.js";
 import { importCatalogCsv } from "../ingest/csv.js";
 import { buildExportCsv } from "../ingest/export.js";
 import {
+  APPROVALS_NEEDED,
   decideGeneration,
   getGeneration,
+  getMetrics,
   requeueProduct,
   statusCounts,
 } from "../db/index.js";
+
+// Quick-tap reasons instead of free text — matches "chat, on my phone,"
+// two taps beats typing. Keys are what travels in callback_data; keep short.
+const REJECT_REASONS: Record<string, string> = {
+  staged: "too staged",
+  light: "lighting/mood off",
+  prod: "product not recognizable",
+  scene: "wrong scene/setting",
+  other: "other",
+};
 
 export const bot = new Bot(config.telegram.botToken);
 
@@ -27,9 +39,17 @@ bot.command("start", async (ctx) => {
 });
 
 bot.command("status", async (ctx) => {
-  const counts = await statusCounts();
+  const [counts, metrics] = await Promise.all([statusCounts(), getMetrics()]);
   const line = (label: string, key: string) =>
     `${label}: ${counts[key] ?? 0}`;
+
+  const pct = (n: number | null) => (n === null ? "—" : `${Math.round(n * 100)}%`);
+  const usd = (n: number | null) => (n === null ? "—" : `$${n.toFixed(3)}`);
+
+  const reasonLines = metrics.topRejectReasons
+    .map((r) => `    • ${r.reason} (${r.count})`)
+    .join("\n");
+
   await ctx.reply(
     [
       "📊 Status",
@@ -40,7 +60,13 @@ bot.command("status", async (ctx) => {
       line("✅ Approved", "approved"),
       line("Needs redo (all rejected)", "needs_redo"),
       line("Errors", "error"),
-    ].join("\n"),
+      "",
+      `💵 Spend so far: $${metrics.totalSpendUsd.toFixed(2)} (${metrics.totalGenerated} images)`,
+      `Approval rate: ${pct(metrics.approvalRate)} · Cost per approved shot: ${usd(metrics.costPerApprovedUsd)}`,
+      reasonLines ? `Top reject reasons:\n${reasonLines}` : "",
+    ]
+      .filter(Boolean)
+      .join("\n"),
   );
 });
 
@@ -103,10 +129,13 @@ bot.on("message:document", async (ctx) => {
 });
 
 // Approve / reject buttons on a generated shot.
+// Flow: "❌ Reject" tap 1 swaps in reason buttons (still same message, no
+// typing needed); tap 2 ("rejr:<id>:<reasonCode>") records the decision +
+// reason. "✅ Approve" needs no second step.
 bot.on("callback_query:data", async (ctx) => {
-  const [action, idStr] = ctx.callbackQuery.data.split(":");
+  const [action, idStr, reasonCode] = ctx.callbackQuery.data.split(":");
   const id = Number(idStr);
-  if (!["appr", "rej"].includes(action) || Number.isNaN(id)) {
+  if (!["appr", "rej", "rejr"].includes(action) || Number.isNaN(id)) {
     await ctx.answerCallbackQuery();
     return;
   }
@@ -121,19 +150,37 @@ bot.on("callback_query:data", async (ctx) => {
     return;
   }
 
+  if (action === "rej") {
+    // Step 1: show reason picker in place of approve/reject.
+    await ctx.answerCallbackQuery();
+    await ctx.editMessageReplyMarkup({
+      reply_markup: {
+        inline_keyboard: [
+          Object.entries(REJECT_REASONS).map(([code, label]) => ({
+            text: label,
+            callback_data: `rejr:${id}:${code}`,
+          })),
+        ],
+      },
+    });
+    return;
+  }
+
   const decision = action === "appr" ? "approved" : "rejected";
-  const { sku, approvedCount } = await decideGeneration(id, decision);
+  const reason = action === "rejr" ? REJECT_REASONS[reasonCode] ?? reasonCode : undefined;
+  const { sku, approvedCount } = await decideGeneration(id, decision, reason);
 
   await ctx.answerCallbackQuery({
     text: decision === "approved" ? "Approved ✅" : "Rejected ❌",
   });
 
-  const badge = decision === "approved" ? "✅ Approved" : "❌ Rejected";
+  const badge =
+    decision === "approved" ? "✅ Approved" : `❌ Rejected (${reason})`;
   await ctx.editMessageCaption({
     caption: `${sku} — variant ${gen.variant_index}\n${badge}`,
   });
 
-  if (decision === "approved" && approvedCount === 2) {
+  if (decision === "approved" && approvedCount === APPROVALS_NEEDED) {
     await ctx.reply(`🎉 ${sku} has enough approved shots — done!`);
   }
 });
