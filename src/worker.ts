@@ -1,6 +1,5 @@
 import { config } from "./config.js";
 import {
-  attachTelegramMessage,
   claimQueuedProducts,
   createGeneration,
   getRecentRejectReasons,
@@ -9,9 +8,14 @@ import {
 } from "./db/index.js";
 import { generateStyledShot } from "./luma/client.js";
 import { uploadGeneratedImage } from "./storage/s3.js";
-import { sendGeneratedShot } from "./telegram/bot.js";
 
-/** One pass: claim queued products, generate N variants each, post for approval. */
+/**
+ * One pass: claim queued products, generate N variants each, store them.
+ * Runs continuously regardless of the clock — only *notifying* Ellie is
+ * gated by work hours (see telegram/notifier.ts). This keeps shots ready
+ * and waiting the moment she comes online instead of making her wait on
+ * generation too.
+ */
 export async function runWorkerTick(): Promise<void> {
   const products = await claimQueuedProducts(
     config.worker.batchSize,
@@ -50,26 +54,18 @@ async function processProduct(product: Product): Promise<void> {
         bytes,
       });
 
-      const generationId = await createGeneration({
+      await createGeneration({
         sku: product.sku,
         variant_index: variant,
         luma_generation_id: gen.id,
         s3_key: s3Key,
         cost_usd: gen.costUsd,
       });
-
-      const message = await sendGeneratedShot({
-        bytes,
-        sku: product.sku,
-        variantIndex: variant,
-        generationId,
-        shotIdea: product.shot_idea,
-      });
-
-      await attachTelegramMessage(generationId, message.message_id);
     }
 
-    await markProductStatus(product.sku, "awaiting_approval");
+    // Not 'awaiting_approval' yet — that transition happens in the notifier,
+    // once these are actually posted to chat.
+    await markProductStatus(product.sku, "generated");
   } catch (e) {
     console.error(`[worker] ${product.sku} failed:`, e);
     await markProductStatus(

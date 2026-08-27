@@ -21,6 +21,7 @@ export type ProductStatus =
   | "no_shot_idea"
   | "queued"
   | "generating"
+  | "generated" // images made, held for the next work-hours window
   | "awaiting_approval"
   | "approved"
   | "needs_redo"
@@ -47,6 +48,7 @@ export interface Generation {
   luma_generation_id: string | null;
   s3_key: string | null;
   telegram_message_id: number | null;
+  posted_to_chat_at: Date | null;
   decision: "pending" | "approved" | "rejected";
   reject_reason: string | null;
   decided_by_user_id: number | null;
@@ -143,6 +145,11 @@ export async function upsertProductFromImport(row: {
  * generating (and spending) further ahead of what she can review. This is
  * the actual backlog control — a big CSV drop drains at review pace, not
  * at API throughput, and nothing generates that nobody's looked at yet.
+ *
+ * "Outstanding" counts both 'generated' (made, waiting for work hours to be
+ * posted) and 'awaiting_approval' (already posted, waiting on a decision) —
+ * generation keeps running overnight, but it still shouldn't run infinitely
+ * far ahead of what Ellie can actually get through once she's online.
  */
 export async function claimQueuedProducts(
   limit: number,
@@ -153,7 +160,7 @@ export async function claimQueuedProducts(
     await client.query("BEGIN");
 
     const { rows: pendingRows } = await client.query<{ count: string }>(
-      `SELECT count(*) FROM products WHERE status = 'awaiting_approval'`,
+      `SELECT count(*) FROM products WHERE status IN ('generated', 'awaiting_approval')`,
     );
     const currentlyPending = Number(pendingRows[0].count);
     const room = Math.max(0, maxPendingReviews - currentlyPending);
@@ -333,19 +340,78 @@ export interface PendingReviewItem {
 }
 
 /**
- * Everything still sitting un-decided — the answer to "what's still waiting
- * on me" without scrolling back through chat history. Oldest first, so the
- * longest-waiting items surface at the top.
+ * Everything actually *posted* and still un-decided — the answer to "what's
+ * waiting on me" without scrolling chat history. Oldest first. Deliberately
+ * excludes 'generated'-but-unposted items (nothing to scroll up to yet);
+ * countQueuedForNextWindow() covers those separately.
  */
 export async function getPendingReviewList(): Promise<PendingReviewItem[]> {
   const { rows } = await pool.query<PendingReviewItem>(
     `SELECT g.id, g.sku, p.name, g.variant_index, g.created_at, g.telegram_message_id
      FROM generations g
      JOIN products p ON p.sku = g.sku
-     WHERE g.decision = 'pending'
+     WHERE g.decision = 'pending' AND g.posted_to_chat_at IS NOT NULL
      ORDER BY g.created_at ASC`,
   );
   return rows;
+}
+
+/** Products sitting ready, held back until the next work-hours window opens. */
+export async function countQueuedForNextWindow(): Promise<number> {
+  const { rows } = await pool.query<{ count: string }>(
+    `SELECT count(*) FROM products WHERE status = 'generated'`,
+  );
+  return Number(rows[0].count);
+}
+
+export interface UnpostedGeneration {
+  id: number;
+  sku: string;
+  name: string;
+  shot_idea: string;
+  variant_index: number;
+  s3_key: string;
+}
+
+/** What the notifier should send next, oldest first, capped to `limit` per tick. */
+export async function getUnpostedGenerations(
+  limit: number,
+): Promise<UnpostedGeneration[]> {
+  const { rows } = await pool.query<UnpostedGeneration>(
+    `SELECT g.id, g.sku, p.name, p.shot_idea, g.variant_index, g.s3_key
+     FROM generations g
+     JOIN products p ON p.sku = g.sku
+     WHERE g.decision = 'pending' AND g.posted_to_chat_at IS NULL AND g.s3_key IS NOT NULL
+     ORDER BY g.created_at ASC
+     LIMIT $1`,
+    [limit],
+  );
+  return rows;
+}
+
+/** Marks a generation as delivered; once every variant for its SKU is posted, the product moves to awaiting_approval. */
+export async function markPosted(
+  id: number,
+  telegramMessageId: number,
+): Promise<void> {
+  const { rows } = await pool.query<{ sku: string }>(
+    `UPDATE generations SET posted_to_chat_at = now(), telegram_message_id = $2
+     WHERE id = $1 RETURNING sku`,
+    [id, telegramMessageId],
+  );
+  const sku = rows[0].sku;
+
+  const { rows: remaining } = await pool.query<{ count: string }>(
+    `SELECT count(*) FROM generations WHERE sku = $1 AND posted_to_chat_at IS NULL`,
+    [sku],
+  );
+  if (Number(remaining[0].count) === 0) {
+    await pool.query(
+      `UPDATE products SET status = 'awaiting_approval', updated_at = now()
+       WHERE sku = $1 AND status = 'generated'`,
+      [sku],
+    );
+  }
 }
 
 export async function statusCounts(): Promise<Record<string, number>> {

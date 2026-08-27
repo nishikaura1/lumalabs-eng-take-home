@@ -38,6 +38,23 @@ export const config = {
     maxPendingReviews: Number(process.env.WORKER_MAX_PENDING_REVIEWS ?? 15),
   },
   port: Number(process.env.PORT ?? 3000),
-  // See src/util/time.ts — unverified assumption, only affects display today.
+  // Unverified assumption (brief never states their timezone/hours) — see
+  // ASSUMPTIONS.md. Drives both display (util/time.ts) and the notifier gate
+  // (util/workhours.ts): generation queues 24/7, but Ellie is only pinged
+  // inside this window; the rest sits ready as a queue until it opens.
   teamTimezone: process.env.TEAM_TIMEZONE ?? "America/Los_Angeles",
+  workHours: {
+    startHour: Number(process.env.WORK_HOURS_START ?? 9), // 24h, local to teamTimezone
+    endHour: Number(process.env.WORK_HOURS_END ?? 18),
+    workDays: (process.env.WORK_DAYS ?? "1,2,3,4,5")
+      .split(",")
+      .map(Number), // 0=Sun..6=Sat
+  },
+  notifier: {
+    pollIntervalMs: Number(process.env.NOTIFIER_POLL_INTERVAL_MS ?? 20_000),
+    // Trickle, don't dump — Telegram soft-limits ~20 msgs/min to one group,
+    // and a wall of 45 photos the second work hours open is a worse
+    // experience than a steady stream. See notifier.ts.
+    batchSize: Number(process.env.NOTIFIER_BATCH_SIZE ?? 5),
+  },
 };

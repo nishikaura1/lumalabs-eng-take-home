@@ -2,6 +2,7 @@ import http from "node:http";
 import { config } from "./config.js";
 import { migrate } from "./db/index.js";
 import { bot } from "./telegram/bot.js";
+import { startNotifierLoop } from "./telegram/notifier.js";
 import { startWorkerLoop } from "./worker.js";
 
 async function main() {
@@ -18,6 +19,7 @@ async function main() {
     .listen(config.port, () => console.log(`[http] health check on :${config.port}`));
 
   startWorkerLoop();
+  startNotifierLoop();
 
   await bot.start({
     onStart: () => console.log("[telegram] bot polling started"),

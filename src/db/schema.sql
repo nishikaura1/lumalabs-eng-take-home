@@ -10,7 +10,8 @@ CREATE TABLE IF NOT EXISTS products (
   photo_url      TEXT NOT NULL,
   shot_idea      TEXT NOT NULL DEFAULT '',
   notes          TEXT,
-  -- no_shot_idea | queued | generating | awaiting_approval | approved | needs_redo | error
+  -- no_shot_idea | queued | generating | generated | awaiting_approval | approved | needs_redo | error
+  -- 'generated' = images made, held for the next work-hours window before Ellie is pinged (see notifier.ts).
   status         TEXT NOT NULL DEFAULT 'no_shot_idea',
   error_message  TEXT,
   created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -24,6 +25,8 @@ CREATE TABLE IF NOT EXISTS generations (
   luma_generation_id  TEXT,
   s3_key              TEXT,
   telegram_message_id BIGINT,
+  -- NULL until the notifier actually sends it (gated by work hours).
+  posted_to_chat_at   TIMESTAMPTZ,
   -- pending | approved | rejected
   decision            TEXT NOT NULL DEFAULT 'pending',
   -- Only set on rejection; see decideGeneration. Feeds the negative guidance
@@ -46,3 +49,4 @@ CREATE INDEX IF NOT EXISTS idx_products_status ON products(status);
 ALTER TABLE generations ADD COLUMN IF NOT EXISTS reject_reason TEXT;
 ALTER TABLE generations ADD COLUMN IF NOT EXISTS decided_by_user_id BIGINT;
 ALTER TABLE generations ADD COLUMN IF NOT EXISTS decided_by_username TEXT;
+ALTER TABLE generations ADD COLUMN IF NOT EXISTS posted_to_chat_at TIMESTAMPTZ;

@@ -4,6 +4,7 @@ import { importCatalogCsv } from "../ingest/csv.js";
 import { buildExportCsv } from "../ingest/export.js";
 import {
   APPROVALS_NEEDED,
+  countQueuedForNextWindow,
   decideGeneration,
   getGeneration,
   getMetrics,
@@ -43,9 +44,18 @@ bot.command("start", async (ctx) => {
 });
 
 bot.command("review", async (ctx) => {
-  const items = await getPendingReviewList();
+  const [items, queuedNext] = await Promise.all([
+    getPendingReviewList(),
+    countQueuedForNextWindow(),
+  ]);
+
+  const queuedNote =
+    queuedNext > 0
+      ? `\n\n+ ${queuedNext} more ready and waiting for the next work-hours window (${config.workHours.startHour}:00–${config.workHours.endHour}:00, ${config.teamTimezone}).`
+      : "";
+
   if (items.length === 0) {
-    await ctx.reply("Nothing waiting on you right now. 🎉");
+    await ctx.reply(`Nothing waiting on you right now. 🎉${queuedNote}`);
     return;
   }
   const lines = items.map(
@@ -53,7 +63,7 @@ bot.command("review", async (ctx) => {
       `• ${it.sku} (${it.name}) — variant ${it.variant_index}, waiting ${relativeTime(it.created_at)}`,
   );
   await ctx.reply(
-    `📋 ${items.length} awaiting your decision (oldest first):\n\n${lines.join("\n")}\n\nScroll up for the photos + buttons, or they'll come up again next time I post new ones.`,
+    `📋 ${items.length} awaiting your decision (oldest first):\n\n${lines.join("\n")}\n\nScroll up for the photos + buttons, or they'll come up again next time I post new ones.${queuedNote}`,
   );
 });
 
@@ -75,6 +85,7 @@ bot.command("status", async (ctx) => {
       line("Awaiting a Shot Idea", "no_shot_idea"),
       line("Queued", "queued"),
       line("Generating", "generating"),
+      line("Ready, queued for work hours", "generated"),
       line("Awaiting your approval", "awaiting_approval"),
       line("✅ Approved", "approved"),
       line("Needs redo (all rejected)", "needs_redo"),
@@ -240,26 +251,31 @@ bot.on("callback_query:data", async (ctx) => {
   }
 });
 
+/** Called by the notifier (work-hours gated) — sends via a signed S3 URL, not raw bytes. */
 export function sendGeneratedShot(opts: {
-  bytes: Buffer;
+  imageUrl: string;
   sku: string;
   variantIndex: number;
   generationId: number;
   shotIdea: string;
 }) {
-  return bot.api.sendPhoto(
-    config.telegram.chatId,
-    new InputFile(opts.bytes, `${opts.sku}-v${opts.variantIndex}.jpg`),
-    {
-      caption: `${opts.sku} — "${opts.shotIdea}" (variant ${opts.variantIndex})`,
-      reply_markup: {
-        inline_keyboard: [
-          [
-            { text: "✅ Approve", callback_data: `appr:${opts.generationId}` },
-            { text: "❌ Reject", callback_data: `rej:${opts.generationId}` },
-          ],
+  return bot.api.sendPhoto(config.telegram.chatId, opts.imageUrl, {
+    caption: `${opts.sku} — "${opts.shotIdea}" (variant ${opts.variantIndex})`,
+    reply_markup: {
+      inline_keyboard: [
+        [
+          { text: "✅ Approve", callback_data: `appr:${opts.generationId}` },
+          { text: "❌ Reject", callback_data: `rej:${opts.generationId}` },
         ],
-      },
+      ],
     },
+  });
+}
+
+/** A short heads-up line before a batch of new shots lands, not one per photo. */
+export function sendNotifierHeader(count: number) {
+  return bot.api.sendMessage(
+    config.telegram.chatId,
+    `🔔 ${count} new shot${count === 1 ? "" : "s"} ready for review:`,
   );
 }
