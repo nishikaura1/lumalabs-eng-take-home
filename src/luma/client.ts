@@ -15,7 +15,20 @@ interface GenerationResponse {
   failure_reason?: string | null;
 }
 
-async function lumaFetch(path: string, init?: RequestInit): Promise<Response> {
+/**
+ * 429 retry/backoff is not theoretical — smoke-tested against the real API
+ * and hit "Concurrent generation limit reached (10)" live, from smoke-test
+ * scripts alone. Our own worker generates variants sequentially per product
+ * (see worker.ts), so its own concurrency is bounded by batchSize (3), well
+ * under 10 — but the limit is account-wide, so /redo calls, retries, or
+ * anything else hitting the same key can still collide with it. Worth
+ * treating as an expected transient condition, not an edge case.
+ */
+async function lumaFetch(
+  path: string,
+  init?: RequestInit,
+  retriesLeft = 5,
+): Promise<Response> {
   const res = await fetch(`${config.luma.baseUrl}${path}`, {
     ...init,
     headers: {
@@ -24,6 +37,19 @@ async function lumaFetch(path: string, init?: RequestInit): Promise<Response> {
       ...(init?.headers ?? {}),
     },
   });
+
+  if (res.status === 429 && retriesLeft > 0) {
+    const retryAfterHeader = res.headers.get("retry-after");
+    const waitMs = retryAfterHeader
+      ? Number(retryAfterHeader) * 1000
+      : Math.min(30_000, 1000 * 2 ** (5 - retriesLeft)) + Math.random() * 500;
+    console.warn(
+      `[luma] 429 on ${path}, retrying in ${Math.round(waitMs)}ms (${retriesLeft} left)`,
+    );
+    await new Promise((r) => setTimeout(r, waitMs));
+    return lumaFetch(path, init, retriesLeft - 1);
+  }
+
   if (!res.ok) {
     const body = await res.text().catch(() => "");
     throw new Error(`Luma API ${path} -> ${res.status}: ${body}`);

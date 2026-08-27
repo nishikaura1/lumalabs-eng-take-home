@@ -5,6 +5,8 @@ node_modules/
 __pycache__/
 .venv/
 .DS_Store
+dist/
+scripts/smoke-output/
 
 # gcloud SDK installs (in case anyone unpacks it inside the repo)
 .gcloud/
