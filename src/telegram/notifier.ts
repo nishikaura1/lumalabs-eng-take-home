@@ -28,6 +28,10 @@ export async function runNotifierTick(): Promise<void> {
         variantIndex: item.variant_index,
         generationId: item.id,
         shotIdea: item.shot_idea,
+        // Shown anyway after a failed retry (see worker.ts) — not hidden,
+        // but Ellie gets the heads-up instead of finding out cold.
+        qualityNote:
+          item.quality_passed === false ? `⚠️ auto-check: ${item.quality_reason}` : undefined,
       });
       await markPosted(item.id, message.message_id);
     } catch (e) {

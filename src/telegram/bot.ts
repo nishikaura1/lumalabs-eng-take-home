@@ -102,6 +102,10 @@ bot.command("status", async (ctx) => {
       `💵 Spend so far: $${metrics.totalSpendUsd.toFixed(2)} (${metrics.totalGenerated} images)`,
       `Approval rate: ${pct(metrics.approvalRate)} · Cost per approved shot: ${usd(metrics.costPerApprovedUsd)}`,
       reasonLines ? `Top reject reasons:\n${reasonLines}` : "",
+      metrics.qualityFlagged > 0
+        ? `🔎 Auto-check flagged ${metrics.qualityFlagged} shot(s) before you saw them. ` +
+          `Reject rate — flagged: ${pct(metrics.flaggedRejectRate)}, clean: ${pct(metrics.cleanRejectRate)}.`
+        : "",
     ]
       .filter(Boolean)
       .join("\n"),
@@ -284,9 +288,16 @@ export function sendGeneratedShot(opts: {
   variantIndex: number;
   generationId: number;
   shotIdea: string;
+  qualityNote?: string;
 }) {
+  const caption = [
+    `${opts.sku} — "${opts.shotIdea}" (variant ${opts.variantIndex})`,
+    opts.qualityNote,
+  ]
+    .filter(Boolean)
+    .join("\n");
   return bot.api.sendPhoto(config.telegram.chatId, opts.imageUrl, {
-    caption: `${opts.sku} — "${opts.shotIdea}" (variant ${opts.variantIndex})`,
+    caption,
     reply_markup: {
       inline_keyboard: [
         [

@@ -42,6 +42,11 @@ CREATE TABLE IF NOT EXISTS generations (
   -- hands, so reopening it after that point would silently desync what
   -- they have from what we think is true. See undecideGeneration.
   exported_at          TIMESTAMPTZ,
+  -- Automated pre-screen verdict (src/quality/screen.ts), before Ellie ever
+  -- sees it. NULL = not screened (feature off). FALSE = flagged but still
+  -- shown after one retry, so a paid-for variant isn't silently dropped.
+  quality_passed       BOOLEAN,
+  quality_reason       TEXT,
   cost_usd            NUMERIC(10, 4),
   created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
   decided_at          TIMESTAMPTZ
@@ -56,3 +61,5 @@ ALTER TABLE generations ADD COLUMN IF NOT EXISTS decided_by_user_id BIGINT;
 ALTER TABLE generations ADD COLUMN IF NOT EXISTS decided_by_username TEXT;
 ALTER TABLE generations ADD COLUMN IF NOT EXISTS posted_to_chat_at TIMESTAMPTZ;
 ALTER TABLE generations ADD COLUMN IF NOT EXISTS exported_at TIMESTAMPTZ;
+ALTER TABLE generations ADD COLUMN IF NOT EXISTS quality_passed BOOLEAN;
+ALTER TABLE generations ADD COLUMN IF NOT EXISTS quality_reason TEXT;

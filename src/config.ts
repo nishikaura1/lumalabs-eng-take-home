@@ -62,6 +62,13 @@ export const config = {
       .split(",")
       .map(Number), // 0=Sun..6=Sat
   },
+  quality: {
+    // Optional on purpose: if unset, screenImage() no-ops as a pass rather
+    // than blocking the pipeline. Key is already provisioned per
+    // .env.example ("we have accounts... will supply real keys").
+    anthropicApiKey: process.env.ANTHROPIC_API_KEY,
+    model: process.env.QUALITY_SCREEN_MODEL ?? "claude-haiku-4-5-20251001",
+  },
   notifier: {
     pollIntervalMs: Number(process.env.NOTIFIER_POLL_INTERVAL_MS ?? 20_000),
     // Trickle, don't dump — Telegram soft-limits ~20 msgs/min to one group,

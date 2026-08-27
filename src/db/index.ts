@@ -54,6 +54,8 @@ export interface Generation {
   decided_by_user_id: number | null;
   decided_by_username: string | null;
   exported_at: Date | null;
+  quality_passed: boolean | null;
+  quality_reason: string | null;
   cost_usd: string | null;
   created_at: Date;
 }
@@ -206,33 +208,29 @@ export async function markProductStatus(
   );
 }
 
-/**
- * Created before the Telegram send, since the message's callback_data needs
- * this row's id. attachTelegramMessage fills in the message id right after.
- */
 export async function createGeneration(g: {
   sku: string;
   variant_index: number;
   luma_generation_id: string;
   s3_key: string;
   cost_usd: number;
+  quality_passed: boolean | null;
+  quality_reason: string | null;
 }): Promise<number> {
   const { rows } = await pool.query<{ id: number }>(
-    `INSERT INTO generations (sku, variant_index, luma_generation_id, s3_key, cost_usd)
-     VALUES ($1,$2,$3,$4,$5) RETURNING id`,
-    [g.sku, g.variant_index, g.luma_generation_id, g.s3_key, g.cost_usd],
+    `INSERT INTO generations (sku, variant_index, luma_generation_id, s3_key, cost_usd, quality_passed, quality_reason)
+     VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id`,
+    [
+      g.sku,
+      g.variant_index,
+      g.luma_generation_id,
+      g.s3_key,
+      g.cost_usd,
+      g.quality_passed,
+      g.quality_reason,
+    ],
   );
   return rows[0].id;
-}
-
-export async function attachTelegramMessage(
-  id: number,
-  telegramMessageId: number,
-): Promise<void> {
-  await pool.query(`UPDATE generations SET telegram_message_id = $2 WHERE id = $1`, [
-    id,
-    telegramMessageId,
-  ]);
 }
 
 export async function getGeneration(id: number): Promise<Generation | null> {
@@ -380,6 +378,8 @@ export interface UnpostedGeneration {
   shot_idea: string;
   variant_index: number;
   s3_key: string;
+  quality_passed: boolean | null;
+  quality_reason: string | null;
 }
 
 /** What the notifier should send next, oldest first, capped to `limit` per tick. */
@@ -387,7 +387,8 @@ export async function getUnpostedGenerations(
   limit: number,
 ): Promise<UnpostedGeneration[]> {
   const { rows } = await pool.query<UnpostedGeneration>(
-    `SELECT g.id, g.sku, p.name, p.shot_idea, g.variant_index, g.s3_key
+    `SELECT g.id, g.sku, p.name, p.shot_idea, g.variant_index, g.s3_key,
+            g.quality_passed, g.quality_reason
      FROM generations g
      JOIN products p ON p.sku = g.sku
      WHERE g.decision = 'pending' AND g.posted_to_chat_at IS NULL AND g.s3_key IS NOT NULL
@@ -441,6 +442,13 @@ export interface Metrics {
   totalSpendUsd: number;
   costPerApprovedUsd: number | null;
   topRejectReasons: { reason: string; count: number }[];
+  qualityFlagged: number;
+  // Reject rate among decided items, split by whether the pre-screen
+  // flagged them — the read on whether the gate is actually doing anything
+  // (flagged items should reject at a noticeably higher rate than clean
+  // ones; if not, the pre-screen isn't earning its keep).
+  flaggedRejectRate: number | null;
+  cleanRejectRate: number | null;
 }
 
 /**
@@ -481,6 +489,35 @@ export async function getMetrics(): Promise<Metrics> {
      GROUP BY reject_reason ORDER BY count(*) DESC LIMIT 5`,
   );
 
+  const { rows: qualityRows } = await pool.query<{
+    quality_passed: boolean | null;
+    decision: string;
+    count: string;
+  }>(
+    `SELECT quality_passed, decision, count(*) FROM generations
+     WHERE decision IN ('approved', 'rejected')
+     GROUP BY quality_passed, decision`,
+  );
+  let flaggedDecided = 0,
+    flaggedRejected = 0,
+    cleanDecided = 0,
+    cleanRejected = 0,
+    qualityFlagged = 0;
+  for (const r of qualityRows) {
+    const n = Number(r.count);
+    if (r.quality_passed === false) {
+      flaggedDecided += n;
+      if (r.decision === "rejected") flaggedRejected += n;
+    } else if (r.quality_passed === true) {
+      cleanDecided += n;
+      if (r.decision === "rejected") cleanRejected += n;
+    }
+  }
+  const { rows: flaggedTotalRows } = await pool.query<{ count: string }>(
+    `SELECT count(*) FROM generations WHERE quality_passed = false`,
+  );
+  qualityFlagged = Number(flaggedTotalRows[0].count);
+
   return {
     totalGenerated: approved + rejected + pending,
     approved,
@@ -489,6 +526,9 @@ export async function getMetrics(): Promise<Metrics> {
     approvalRate: decided > 0 ? approved / decided : null,
     totalSpendUsd,
     costPerApprovedUsd: approved > 0 ? totalSpendUsd / approved : null,
+    qualityFlagged,
+    flaggedRejectRate: flaggedDecided > 0 ? flaggedRejected / flaggedDecided : null,
+    cleanRejectRate: cleanDecided > 0 ? cleanRejected / cleanDecided : null,
     topRejectReasons: reasonRows.map((r) => ({
       reason: r.reject_reason,
       count: Number(r.count),

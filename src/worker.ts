@@ -7,7 +7,8 @@ import {
   type Product,
 } from "./db/index.js";
 import { generateStyledShot } from "./luma/client.js";
-import { uploadGeneratedImage } from "./storage/s3.js";
+import { screenImage } from "./quality/screen.js";
+import { signedUrlFor, uploadGeneratedImage } from "./storage/s3.js";
 import { sendCriticalAlert } from "./telegram/bot.js";
 
 // Consecutive fully-failed ticks — distinguishes "one bad product" (normal,
@@ -66,27 +67,7 @@ async function processProduct(product: Product): Promise<boolean> {
         : product.shot_idea;
 
     for (let variant = 1; variant <= config.worker.variantsPerRequest; variant++) {
-      const gen = await generateStyledShot({
-        photoUrl: product.photo_url,
-        prompt,
-      });
-
-      const imgRes = await fetch(gen.outputUrl);
-      const bytes = Buffer.from(await imgRes.arrayBuffer());
-
-      const s3Key = await uploadGeneratedImage({
-        sku: product.sku,
-        variantIndex: variant,
-        bytes,
-      });
-
-      await createGeneration({
-        sku: product.sku,
-        variant_index: variant,
-        luma_generation_id: gen.id,
-        s3_key: s3Key,
-        cost_usd: gen.costUsd,
-      });
+      await generateAndScreenVariant(product, variant, prompt);
     }
 
     // Not 'awaiting_approval' yet — that transition happens in the notifier,
@@ -101,6 +82,58 @@ async function processProduct(product: Product): Promise<boolean> {
       e instanceof Error ? e.message : String(e),
     );
     return false;
+  }
+}
+
+/**
+ * Generate one variant, run it past the quality pre-screen, and — on a
+ * fail — retry exactly once with a nudged prompt before giving up. Never
+ * more than one retry: this stays inside the same cost-discipline pattern
+ * as everything else (a human decides further spend, not a loop). If the
+ * retry still fails, the variant is still stored and shown, just flagged,
+ * so a paid-for attempt is never silently thrown away.
+ */
+async function generateAndScreenVariant(
+  product: Product,
+  variant: number,
+  basePrompt: string,
+): Promise<void> {
+  let prompt = basePrompt;
+
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    const gen = await generateStyledShot({ photoUrl: product.photo_url, prompt });
+
+    const imgRes = await fetch(gen.outputUrl);
+    const bytes = Buffer.from(await imgRes.arrayBuffer());
+
+    const s3Key = await uploadGeneratedImage({
+      sku: product.sku,
+      variantIndex: variant,
+      bytes,
+    });
+
+    const screenUrl = await signedUrlFor(s3Key, 300); // just long enough for the screening call to fetch it
+    const verdict = await screenImage({
+      referencePhotoUrl: product.photo_url,
+      generatedImageUrl: screenUrl,
+    });
+
+    const isFinalAttempt = attempt === 2 || verdict.passed;
+    if (isFinalAttempt) {
+      await createGeneration({
+        sku: product.sku,
+        variant_index: variant,
+        luma_generation_id: gen.id,
+        s3_key: s3Key,
+        cost_usd: gen.costUsd,
+        quality_passed: verdict.passed,
+        quality_reason: verdict.reason,
+      });
+      return;
+    }
+
+    console.log(`[worker] ${product.sku} v${variant} flagged (${verdict.reason}), retrying once`);
+    prompt = `${basePrompt}. Make sure the product itself keeps the same shape, color, and material as the reference photo, and the image is clean and in focus.`;
   }
 }
 
