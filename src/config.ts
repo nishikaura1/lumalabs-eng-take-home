@@ -38,4 +38,6 @@ export const config = {
     maxPendingReviews: Number(process.env.WORKER_MAX_PENDING_REVIEWS ?? 15),
   },
   port: Number(process.env.PORT ?? 3000),
+  // See src/util/time.ts — unverified assumption, only affects display today.
+  teamTimezone: process.env.TEAM_TIMEZONE ?? "America/Los_Angeles",
 };

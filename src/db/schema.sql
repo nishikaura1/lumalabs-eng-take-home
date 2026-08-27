@@ -30,6 +30,10 @@ CREATE TABLE IF NOT EXISTS generations (
   -- appended to the prompt on the next /redo, so a reject actually teaches
   -- the next attempt instead of repeating blindly.
   reject_reason        TEXT,
+  -- Who decided, for accountability/audit in a shared group chat (Ellie's
+  -- pick is the decision, but Maya or others are in the same chat).
+  decided_by_user_id   BIGINT,
+  decided_by_username  TEXT,
   cost_usd            NUMERIC(10, 4),
   created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
   decided_at          TIMESTAMPTZ
@@ -40,3 +44,5 @@ CREATE INDEX IF NOT EXISTS idx_products_status ON products(status);
 
 -- Additive, idempotent migrations for columns added after the first deploy.
 ALTER TABLE generations ADD COLUMN IF NOT EXISTS reject_reason TEXT;
+ALTER TABLE generations ADD COLUMN IF NOT EXISTS decided_by_user_id BIGINT;
+ALTER TABLE generations ADD COLUMN IF NOT EXISTS decided_by_username TEXT;

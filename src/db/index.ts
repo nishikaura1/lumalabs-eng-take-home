@@ -49,7 +49,10 @@ export interface Generation {
   telegram_message_id: number | null;
   decision: "pending" | "approved" | "rejected";
   reject_reason: string | null;
+  decided_by_user_id: number | null;
+  decided_by_username: string | null;
   cost_usd: string | null;
+  created_at: Date;
 }
 
 // README: "Done" = 2-3 approved images. We take the ceiling — cheaper to
@@ -57,7 +60,16 @@ export interface Generation {
 // than to round-trip a /redo for the third shot.
 export const APPROVALS_NEEDED = 3;
 
-/** Upsert a row from a CSV import. Returns true if this row needs (re)generation. */
+/**
+ * Upsert a row from a CSV import. `sku` must already be normalized
+ * (trim + uppercase) by the caller — that's what makes SKU identity stable
+ * across drops even if someone's export varies casing/whitespace.
+ *
+ * `photoInvalidReason`: pass a reason when the caller has already verified
+ * the Photo URL is unreachable/not-an-image — the row is still recorded
+ * (visible in /status and /export) but parked in 'error' rather than queued,
+ * so we don't spend a Luma call on a link we already know is broken.
+ */
 export async function upsertProductFromImport(row: {
   sku: string;
   name: string;
@@ -68,6 +80,7 @@ export async function upsertProductFromImport(row: {
   photo_url: string;
   shot_idea: string;
   notes: string | null;
+  photoInvalidReason?: string;
 }): Promise<{ enqueued: boolean }> {
   const existing = await pool.query<Product>(
     `SELECT * FROM products WHERE sku = $1`,
@@ -80,16 +93,19 @@ export async function upsertProductFromImport(row: {
 
   // Don't re-enqueue (and re-spend) on a row we've already processed unless
   // the Shot Idea text itself changed, or it never had one before.
-  const shouldEnqueue = hasShotIdea && shotIdeaChanged;
-  const status: ProductStatus = shouldEnqueue
-    ? "queued"
-    : !hasShotIdea
-      ? "no_shot_idea"
-      : (prev?.status ?? "queued");
+  const wouldEnqueue = hasShotIdea && shotIdeaChanged;
+  const shouldEnqueue = wouldEnqueue && !row.photoInvalidReason;
+  const status: ProductStatus = row.photoInvalidReason
+    ? "error"
+    : shouldEnqueue
+      ? "queued"
+      : !hasShotIdea
+        ? "no_shot_idea"
+        : (prev?.status ?? "queued");
 
   await pool.query(
-    `INSERT INTO products (sku, name, category, color, material, price, photo_url, shot_idea, notes, status, updated_at)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10, now())
+    `INSERT INTO products (sku, name, category, color, material, price, photo_url, shot_idea, notes, status, error_message, updated_at)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11, now())
      ON CONFLICT (sku) DO UPDATE SET
        name = EXCLUDED.name,
        category = EXCLUDED.category,
@@ -100,6 +116,7 @@ export async function upsertProductFromImport(row: {
        shot_idea = EXCLUDED.shot_idea,
        notes = EXCLUDED.notes,
        status = EXCLUDED.status,
+       error_message = EXCLUDED.error_message,
        updated_at = now()`,
     [
       row.sku,
@@ -112,6 +129,7 @@ export async function upsertProductFromImport(row: {
       row.shot_idea,
       row.notes,
       status,
+      row.photoInvalidReason ?? null,
     ],
   );
 
@@ -221,35 +239,68 @@ export async function getGeneration(id: number): Promise<Generation | null> {
 export async function decideGeneration(
   id: number,
   decision: "approved" | "rejected",
+  decidedBy: { userId: number; username: string },
   rejectReason?: string,
 ): Promise<{ sku: string; approvedCount: number }> {
   const { rows } = await pool.query<{ sku: string }>(
-    `UPDATE generations SET decision = $2, decided_at = now(), reject_reason = $3 WHERE id = $1 RETURNING sku`,
-    [id, decision, rejectReason ?? null],
+    `UPDATE generations
+     SET decision = $2, decided_at = now(), reject_reason = $3,
+         decided_by_user_id = $4, decided_by_username = $5
+     WHERE id = $1 RETURNING sku`,
+    [id, decision, rejectReason ?? null, decidedBy.userId, decidedBy.username],
   );
   const sku = rows[0].sku;
+  await recomputeProductStatus(sku);
 
   const { rows: countRows } = await pool.query<{ count: string }>(
     `SELECT count(*) FROM generations WHERE sku = $1 AND decision = 'approved'`,
     [sku],
   );
-  const approvedCount = Number(countRows[0].count);
+  return { sku, approvedCount: Number(countRows[0].count) };
+}
 
-  if (approvedCount >= APPROVALS_NEEDED) {
+/**
+ * Undo a mis-tap. Resets the generation to pending and re-derives the
+ * product's status from scratch — covers both "undo an approve" (may drop
+ * the product back out of 'approved') and "undo a reject" (reopens a
+ * 'needs_redo' product back to awaiting review) with the same logic.
+ */
+export async function undecideGeneration(
+  id: number,
+): Promise<{ sku: string } | null> {
+  const { rows } = await pool.query<{ sku: string; decision: string }>(
+    `UPDATE generations
+     SET decision = 'pending', decided_at = NULL, reject_reason = NULL,
+         decided_by_user_id = NULL, decided_by_username = NULL
+     WHERE id = $1 AND decision != 'pending'
+     RETURNING sku, decision`,
+    [id],
+  );
+  if (rows.length === 0) return null;
+  const sku = rows[0].sku;
+  await recomputeProductStatus(sku);
+  return { sku };
+}
+
+async function recomputeProductStatus(sku: string): Promise<void> {
+  const { rows } = await pool.query<{ decision: string; count: string }>(
+    `SELECT decision, count(*) FROM generations WHERE sku = $1 GROUP BY decision`,
+    [sku],
+  );
+  const counts: Record<string, number> = {};
+  for (const r of rows) counts[r.decision] = Number(r.count);
+  const approved = counts.approved ?? 0;
+  const pending = counts.pending ?? 0;
+
+  if (approved >= APPROVALS_NEEDED) {
     await markProductStatus(sku, "approved");
-  } else if (decision === "rejected") {
-    // Leave as awaiting_approval if other variants are still pending; a human
-    // explicitly re-queues via /redo rather than us auto-regenerating.
-    const { rows: pendingRows } = await pool.query<{ count: string }>(
-      `SELECT count(*) FROM generations WHERE sku = $1 AND decision = 'pending'`,
-      [sku],
-    );
-    if (Number(pendingRows[0].count) === 0) {
-      await markProductStatus(sku, "needs_redo");
-    }
+  } else if (pending > 0) {
+    await markProductStatus(sku, "awaiting_approval");
+  } else {
+    // Everything's decided and we still don't have enough approvals — a
+    // human explicitly re-queues via /redo rather than us auto-regenerating.
+    await markProductStatus(sku, "needs_redo");
   }
-
-  return { sku, approvedCount };
 }
 
 /** Distinct reject reasons from this product's last round, for prompt guidance on /redo. */
@@ -270,6 +321,31 @@ export async function requeueProduct(sku: string): Promise<boolean> {
     [sku],
   );
   return (rowCount ?? 0) > 0;
+}
+
+export interface PendingReviewItem {
+  id: number;
+  sku: string;
+  name: string;
+  variant_index: number;
+  created_at: Date;
+  telegram_message_id: number | null;
+}
+
+/**
+ * Everything still sitting un-decided — the answer to "what's still waiting
+ * on me" without scrolling back through chat history. Oldest first, so the
+ * longest-waiting items surface at the top.
+ */
+export async function getPendingReviewList(): Promise<PendingReviewItem[]> {
+  const { rows } = await pool.query<PendingReviewItem>(
+    `SELECT g.id, g.sku, p.name, g.variant_index, g.created_at, g.telegram_message_id
+     FROM generations g
+     JOIN products p ON p.sku = g.sku
+     WHERE g.decision = 'pending'
+     ORDER BY g.created_at ASC`,
+  );
+  return rows;
 }
 
 export async function statusCounts(): Promise<Record<string, number>> {

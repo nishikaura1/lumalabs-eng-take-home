@@ -7,9 +7,12 @@ import {
   decideGeneration,
   getGeneration,
   getMetrics,
+  getPendingReviewList,
   requeueProduct,
   statusCounts,
+  undecideGeneration,
 } from "../db/index.js";
+import { relativeTime } from "../util/time.js";
 
 // Quick-tap reasons instead of free text — matches "chat, on my phone,"
 // two taps beats typing. Keys are what travels in callback_data; keep short.
@@ -33,8 +36,24 @@ bot.command("start", async (ctx) => {
       "• Send me a catalog .csv to import new products / a new drop.\n" +
       "• I'll post generated shots here for approve/reject.\n" +
       "• /status — where things stand right now.\n" +
+      "• /review — everything still waiting on a decision, oldest first.\n" +
       "• /export — get an updated catalog CSV with statuses + approved links.\n" +
       "• /redo SKU — re-queue a product whose shots were all rejected.",
+  );
+});
+
+bot.command("review", async (ctx) => {
+  const items = await getPendingReviewList();
+  if (items.length === 0) {
+    await ctx.reply("Nothing waiting on you right now. 🎉");
+    return;
+  }
+  const lines = items.map(
+    (it) =>
+      `• ${it.sku} (${it.name}) — variant ${it.variant_index}, waiting ${relativeTime(it.created_at)}`,
+  );
+  await ctx.reply(
+    `📋 ${items.length} awaiting your decision (oldest first):\n\n${lines.join("\n")}\n\nScroll up for the photos + buttons, or they'll come up again next time I post new ones.`,
   );
 });
 
@@ -110,6 +129,12 @@ bot.on("message:document", async (ctx) => {
         `Import done: ${result.totalRows} rows.`,
         `${result.newOrChanged} new/changed → queued for generation.`,
         `${result.skipped} already up to date, skipped.`,
+        result.photoInvalid
+          ? `⚠️ ${result.photoInvalid} row(s) have a broken/non-image Photo link — parked as errors, not queued (no spend). Fix the link and re-send the CSV to retry.`
+          : "",
+        result.duplicateSkus.length
+          ? `⚠️ Duplicate SKU(s) in this file, last row wins: ${result.duplicateSkus.join(", ")}`
+          : "",
         result.errors.length
           ? `${result.errors.length} row(s) had problems:\n` +
             result.errors
@@ -131,12 +156,35 @@ bot.on("message:document", async (ctx) => {
 // Approve / reject buttons on a generated shot.
 // Flow: "❌ Reject" tap 1 swaps in reason buttons (still same message, no
 // typing needed); tap 2 ("rejr:<id>:<reasonCode>") records the decision +
-// reason. "✅ Approve" needs no second step.
+// reason. "✅ Approve" needs no second step. Either way, the finished message
+// gets a single "↩️ Undo" button in place of the original ones — no stale
+// buttons that silently no-op, and mis-taps are recoverable.
 bot.on("callback_query:data", async (ctx) => {
   const [action, idStr, reasonCode] = ctx.callbackQuery.data.split(":");
   const id = Number(idStr);
-  if (!["appr", "rej", "rejr"].includes(action) || Number.isNaN(id)) {
+  if (!["appr", "rej", "rejr", "undo"].includes(action) || Number.isNaN(id)) {
     await ctx.answerCallbackQuery();
+    return;
+  }
+
+  if (action === "undo") {
+    const result = await undecideGeneration(id);
+    if (!result) {
+      await ctx.answerCallbackQuery({ text: "Nothing to undo." });
+      return;
+    }
+    await ctx.answerCallbackQuery({ text: "Undone — back to pending." });
+    await ctx.editMessageCaption({
+      caption: `${result.sku} — reopened for review`,
+      reply_markup: {
+        inline_keyboard: [
+          [
+            { text: "✅ Approve", callback_data: `appr:${id}` },
+            { text: "❌ Reject", callback_data: `rej:${id}` },
+          ],
+        ],
+      },
+    });
     return;
   }
 
@@ -168,7 +216,11 @@ bot.on("callback_query:data", async (ctx) => {
 
   const decision = action === "appr" ? "approved" : "rejected";
   const reason = action === "rejr" ? REJECT_REASONS[reasonCode] ?? reasonCode : undefined;
-  const { sku, approvedCount } = await decideGeneration(id, decision, reason);
+  const decidedBy = {
+    userId: ctx.from.id,
+    username: ctx.from.username ?? ctx.from.first_name,
+  };
+  const { sku, approvedCount } = await decideGeneration(id, decision, decidedBy, reason);
 
   await ctx.answerCallbackQuery({
     text: decision === "approved" ? "Approved ✅" : "Rejected ❌",
@@ -177,7 +229,10 @@ bot.on("callback_query:data", async (ctx) => {
   const badge =
     decision === "approved" ? "✅ Approved" : `❌ Rejected (${reason})`;
   await ctx.editMessageCaption({
-    caption: `${sku} — variant ${gen.variant_index}\n${badge}`,
+    caption: `${sku} — variant ${gen.variant_index}\n${badge}\n— ${decidedBy.username}`,
+    reply_markup: {
+      inline_keyboard: [[{ text: "↩️ Undo", callback_data: `undo:${id}` }]],
+    },
   });
 
   if (decision === "approved" && approvedCount === APPROVALS_NEEDED) {
