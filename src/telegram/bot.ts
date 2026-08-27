@@ -31,6 +31,14 @@ function isAuthorizedChat(chatId: number): boolean {
   return String(chatId) === config.telegram.chatId;
 }
 
+/** Ellie is the only writer; everyone else in the chat is read-only. See config.ts. */
+function isEllie(userId: number | undefined): boolean {
+  return userId === config.telegram.ellieUserId;
+}
+
+const READ_ONLY_NOTICE =
+  "Only Ellie can do that here. Everyone else has read-only access — /status, /review, and /export work for anyone.";
+
 bot.command("start", async (ctx) => {
   await ctx.reply(
     "Styled Shots bot online.\n\n" +
@@ -109,6 +117,10 @@ bot.command("export", async (ctx) => {
 });
 
 bot.command("redo", async (ctx) => {
+  if (!isEllie(ctx.from?.id)) {
+    await ctx.reply(READ_ONLY_NOTICE);
+    return;
+  }
   const sku = ctx.match?.toString().trim().toUpperCase();
   if (!sku) {
     await ctx.reply("Usage: /redo SKU (e.g. /redo HG-002)");
@@ -127,6 +139,10 @@ bot.on("message:document", async (ctx) => {
   if (!isAuthorizedChat(ctx.chat.id)) return;
   const doc = ctx.message.document;
   if (!doc.file_name?.toLowerCase().endsWith(".csv")) return;
+  if (!isEllie(ctx.from?.id)) {
+    await ctx.reply(READ_ONLY_NOTICE);
+    return;
+  }
 
   await ctx.reply(`Importing ${doc.file_name}…`);
   try {
@@ -177,11 +193,21 @@ bot.on("callback_query:data", async (ctx) => {
     await ctx.answerCallbackQuery();
     return;
   }
+  if (!isEllie(ctx.from.id)) {
+    await ctx.answerCallbackQuery({ text: READ_ONLY_NOTICE, show_alert: true });
+    return;
+  }
 
   if (action === "undo") {
     const result = await undecideGeneration(id);
-    if (!result) {
-      await ctx.answerCallbackQuery({ text: "Nothing to undo." });
+    if (!result.ok) {
+      await ctx.answerCallbackQuery({
+        text:
+          result.reason === "already_exported"
+            ? "Can't undo — this already went out in an export to the web team."
+            : "Nothing to undo.",
+        show_alert: result.reason === "already_exported",
+      });
       return;
     }
     await ctx.answerCallbackQuery({ text: "Undone — back to pending." });
@@ -270,6 +296,16 @@ export function sendGeneratedShot(opts: {
       ],
     },
   });
+}
+
+/**
+ * Bypasses the work-hours gate deliberately — this is an operational alert
+ * (systemic failure: bad API key, Luma/S3 outage), not a review ping, so it
+ * doesn't wait for the notifier's window. Per direction: no proactive budget
+ * alerts, but critical failures are a different category.
+ */
+export function sendCriticalAlert(text: string) {
+  return bot.api.sendMessage(config.telegram.chatId, `🔴 ${text}`);
 }
 
 /** A short heads-up line before a batch of new shots lands, not one per photo. */

@@ -53,6 +53,7 @@ export interface Generation {
   reject_reason: string | null;
   decided_by_user_id: number | null;
   decided_by_username: string | null;
+  exported_at: Date | null;
   cost_usd: string | null;
   created_at: Date;
 }
@@ -266,27 +267,35 @@ export async function decideGeneration(
   return { sku, approvedCount: Number(countRows[0].count) };
 }
 
+export type UndecideResult =
+  | { ok: true; sku: string }
+  | { ok: false; reason: "not_found" | "already_exported" };
+
 /**
  * Undo a mis-tap. Resets the generation to pending and re-derives the
  * product's status from scratch — covers both "undo an approve" (may drop
  * the product back out of 'approved') and "undo a reject" (reopens a
  * 'needs_redo' product back to awaiting review) with the same logic.
+ *
+ * Refused once exported_at is set — see schema.sql. The CSV may already be
+ * with the web team; undoing after that point would silently desync it.
  */
-export async function undecideGeneration(
-  id: number,
-): Promise<{ sku: string } | null> {
-  const { rows } = await pool.query<{ sku: string; decision: string }>(
+export async function undecideGeneration(id: number): Promise<UndecideResult> {
+  const gen = await getGeneration(id);
+  if (!gen || gen.decision === "pending") return { ok: false, reason: "not_found" };
+  if (gen.exported_at) return { ok: false, reason: "already_exported" };
+
+  const { rows } = await pool.query<{ sku: string }>(
     `UPDATE generations
      SET decision = 'pending', decided_at = NULL, reject_reason = NULL,
          decided_by_user_id = NULL, decided_by_username = NULL
-     WHERE id = $1 AND decision != 'pending'
-     RETURNING sku, decision`,
+     WHERE id = $1
+     RETURNING sku`,
     [id],
   );
-  if (rows.length === 0) return null;
   const sku = rows[0].sku;
   await recomputeProductStatus(sku);
-  return { sku };
+  return { ok: true, sku };
 }
 
 async function recomputeProductStatus(sku: string): Promise<void> {
@@ -487,17 +496,33 @@ export async function getMetrics(): Promise<Metrics> {
   };
 }
 
+export interface ApprovedGenerationRef {
+  id: number;
+  s3_key: string;
+}
+
 export async function allProductsForExport(): Promise<
-  (Product & { approved_urls: string[] })[]
+  (Product & { approved: ApprovedGenerationRef[] })[]
 > {
-  const { rows } = await pool.query<Product & { approved_urls: string[] }>(
+  const { rows } = await pool.query<Product & { approved: ApprovedGenerationRef[] }>(
     `SELECT p.*, coalesce(
-       array_agg(g.s3_key) FILTER (WHERE g.decision = 'approved'), '{}'
-     ) AS approved_urls
+       jsonb_agg(jsonb_build_object('id', g.id, 's3_key', g.s3_key))
+         FILTER (WHERE g.decision = 'approved'),
+       '[]'
+     ) AS approved
      FROM products p
      LEFT JOIN generations g ON g.sku = p.sku
      GROUP BY p.sku
      ORDER BY p.sku`,
   );
   return rows;
+}
+
+/** Lock these generations against undo — called once their links go out in a built export. */
+export async function markExported(ids: number[]): Promise<void> {
+  if (ids.length === 0) return;
+  await pool.query(
+    `UPDATE generations SET exported_at = now() WHERE id = ANY($1) AND exported_at IS NULL`,
+    [ids],
+  );
 }

@@ -37,6 +37,11 @@ CREATE TABLE IF NOT EXISTS generations (
   -- pick is the decision, but Maya or others are in the same chat).
   decided_by_user_id   BIGINT,
   decided_by_username  TEXT,
+  -- Set the first time this generation is included in a built /export.
+  -- Once set, undo is refused — the CSV may already be in the web team's
+  -- hands, so reopening it after that point would silently desync what
+  -- they have from what we think is true. See undecideGeneration.
+  exported_at          TIMESTAMPTZ,
   cost_usd            NUMERIC(10, 4),
   created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
   decided_at          TIMESTAMPTZ
@@ -50,3 +55,4 @@ ALTER TABLE generations ADD COLUMN IF NOT EXISTS reject_reason TEXT;
 ALTER TABLE generations ADD COLUMN IF NOT EXISTS decided_by_user_id BIGINT;
 ALTER TABLE generations ADD COLUMN IF NOT EXISTS decided_by_username TEXT;
 ALTER TABLE generations ADD COLUMN IF NOT EXISTS posted_to_chat_at TIMESTAMPTZ;
+ALTER TABLE generations ADD COLUMN IF NOT EXISTS exported_at TIMESTAMPTZ;

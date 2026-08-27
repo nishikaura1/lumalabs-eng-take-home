@@ -12,6 +12,12 @@ export const config = {
     // The single group chat both Ellie and Maya are in. See ASSUMPTIONS.md —
     // membership in this chat *is* the auth boundary for a 6-person team.
     chatId: required("TELEGRAM_CHAT_ID"),
+    // Ellie is the only writer: approve/reject/undo/redo and CSV import all
+    // require this user id. Everyone else in the chat is read-only
+    // (/status, /review, /export). Matches the brief verbatim — "her pick
+    // is the decision; there is no other approval step" — extended to the
+    // rest of the write surface for one consistent, simple rule.
+    ellieUserId: Number(required("TELEGRAM_ELLIE_USER_ID")),
   },
   luma: {
     apiKey: required("LUMA_AGENTS_API_KEY"),
@@ -36,6 +42,12 @@ export const config = {
     // review pace on a big drop (e.g. the 40-product test) — see
     // claimQueuedProducts in db/index.ts.
     maxPendingReviews: Number(process.env.WORKER_MAX_PENDING_REVIEWS ?? 15),
+    // Consecutive fully-failed ticks before we treat it as systemic (bad
+    // API key, Luma/S3 outage) rather than one bad product, and push a
+    // critical alert. See worker.ts.
+    criticalFailureTickThreshold: Number(
+      process.env.CRITICAL_FAILURE_TICK_THRESHOLD ?? 2,
+    ),
   },
   port: Number(process.env.PORT ?? 3000),
   // Unverified assumption (brief never states their timezone/hours) — see
