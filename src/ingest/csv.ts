@@ -1,5 +1,5 @@
 import { parse } from "csv-parse/sync";
-import { upsertProductFromImport } from "../db/index.js";
+import { getExistingProductForImport, upsertProductFromImport } from "../db/index.js";
 import { validatePhotoUrl } from "./validate.js";
 
 // Matches data/catalog.csv (and Maya's "same columns, new products, new
@@ -74,19 +74,37 @@ export async function importCatalogCsv(csvText: string): Promise<ImportResult> {
         continue;
       }
 
-      const photoCheck = await validatePhotoUrl(row.Photo.trim());
+      const sku = normalizeSku(row.SKU);
+      const photoUrl = row.Photo.trim();
+
+      // Skip the HEAD/GET check entirely when this exact URL was already
+      // validated for this SKU — a re-sent, unchanged CSV (a very plausible
+      // "did that work? let me resend it" action) shouldn't re-check 300
+      // URLs that haven't moved.
+      const existing = await getExistingProductForImport(sku);
+      const canReuseVerdict =
+        existing !== null &&
+        existing.photo_url === photoUrl &&
+        existing.photo_validated_ok !== null;
+
+      const photoCheck: { ok: true } | { ok: false; reason: string } = canReuseVerdict
+        ? existing!.photo_validated_ok
+          ? { ok: true }
+          : { ok: false, reason: "photo URL previously failed validation (cached, unchanged)" }
+        : await validatePhotoUrl(photoUrl);
       if (!photoCheck.ok) result.photoInvalid++;
 
       const { enqueued } = await upsertProductFromImport({
-        sku: normalizeSku(row.SKU),
+        sku,
         name: row["Product Name"]?.trim() ?? "",
         category: row.Category?.trim() || null,
         color: row["Color / Finish"]?.trim() || null,
         material: row.Material?.trim() || null,
         price: row.Price?.trim() || null,
-        photo_url: row.Photo.trim(),
+        photo_url: photoUrl,
         shot_idea: row["Shot Idea"]?.trim() ?? "",
         notes: row.Notes?.trim() || null,
+        photoValidatedOk: photoCheck.ok,
         photoInvalidReason: photoCheck.ok ? undefined : photoCheck.reason,
       });
       if (enqueued) result.newOrChanged++;

@@ -14,6 +14,11 @@ CREATE TABLE IF NOT EXISTS products (
   -- 'generated' = images made, held for the next work-hours window before Ellie is pinged (see notifier.ts).
   status         TEXT NOT NULL DEFAULT 'no_shot_idea',
   error_message  TEXT,
+  -- Cached verdict from validate.ts, keyed to photo_url. Re-checked only
+  -- when photo_url actually changes on import — a re-sent, unchanged CSV
+  -- shouldn't re-HEAD-request 300 URLs that haven't moved. NULL = never
+  -- checked yet.
+  photo_validated_ok BOOLEAN,
   created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at     TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -63,3 +68,4 @@ ALTER TABLE generations ADD COLUMN IF NOT EXISTS posted_to_chat_at TIMESTAMPTZ;
 ALTER TABLE generations ADD COLUMN IF NOT EXISTS exported_at TIMESTAMPTZ;
 ALTER TABLE generations ADD COLUMN IF NOT EXISTS quality_passed BOOLEAN;
 ALTER TABLE generations ADD COLUMN IF NOT EXISTS quality_reason TEXT;
+ALTER TABLE products ADD COLUMN IF NOT EXISTS photo_validated_ok BOOLEAN;

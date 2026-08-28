@@ -6,7 +6,7 @@ import { config } from "../config.js";
 
 const { Pool } = pg;
 
-export const pool = new Pool({ connectionString: config.db.url });
+export const pool = new Pool({ connectionString: config.db.url, ssl: config.db.ssl });
 
 export async function migrate(): Promise<void> {
   const schemaPath = path.join(
@@ -39,6 +39,7 @@ export interface Product {
   notes: string | null;
   status: ProductStatus;
   error_message: string | null;
+  photo_validated_ok: boolean | null;
 }
 
 export interface Generation {
@@ -65,15 +66,28 @@ export interface Generation {
 // than to round-trip a /redo for the third shot.
 export const APPROVALS_NEEDED = 3;
 
+/** Cheap lookup so the importer can decide whether Photo URL re-validation is even needed. */
+export async function getExistingProductForImport(
+  sku: string,
+): Promise<{ photo_url: string; photo_validated_ok: boolean | null } | null> {
+  const { rows } = await pool.query<{ photo_url: string; photo_validated_ok: boolean | null }>(
+    `SELECT photo_url, photo_validated_ok FROM products WHERE sku = $1`,
+    [sku],
+  );
+  return rows[0] ?? null;
+}
+
 /**
  * Upsert a row from a CSV import. `sku` must already be normalized
  * (trim + uppercase) by the caller — that's what makes SKU identity stable
  * across drops even if someone's export varies casing/whitespace.
  *
- * `photoInvalidReason`: pass a reason when the caller has already verified
- * the Photo URL is unreachable/not-an-image — the row is still recorded
- * (visible in /status and /export) but parked in 'error' rather than queued,
- * so we don't spend a Luma call on a link we already know is broken.
+ * `photoValidatedOk`/`photoInvalidReason`: the caller (ingest/csv.ts) has
+ * already resolved the photo verdict — either freshly checked, or reused
+ * from photo_validated_ok when the URL hasn't changed since last import
+ * (see getExistingProductForImport). A false verdict parks the row in
+ * 'error' rather than queued, so we don't spend a Luma call on a link we
+ * already know is broken.
  */
 export async function upsertProductFromImport(row: {
   sku: string;
@@ -85,6 +99,7 @@ export async function upsertProductFromImport(row: {
   photo_url: string;
   shot_idea: string;
   notes: string | null;
+  photoValidatedOk: boolean;
   photoInvalidReason?: string;
 }): Promise<{ enqueued: boolean }> {
   const existing = await pool.query<Product>(
@@ -99,8 +114,8 @@ export async function upsertProductFromImport(row: {
   // Don't re-enqueue (and re-spend) on a row we've already processed unless
   // the Shot Idea text itself changed, or it never had one before.
   const wouldEnqueue = hasShotIdea && shotIdeaChanged;
-  const shouldEnqueue = wouldEnqueue && !row.photoInvalidReason;
-  const status: ProductStatus = row.photoInvalidReason
+  const shouldEnqueue = wouldEnqueue && row.photoValidatedOk;
+  const status: ProductStatus = !row.photoValidatedOk
     ? "error"
     : shouldEnqueue
       ? "queued"
@@ -109,8 +124,8 @@ export async function upsertProductFromImport(row: {
         : (prev?.status ?? "queued");
 
   await pool.query(
-    `INSERT INTO products (sku, name, category, color, material, price, photo_url, shot_idea, notes, status, error_message, updated_at)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11, now())
+    `INSERT INTO products (sku, name, category, color, material, price, photo_url, shot_idea, notes, status, error_message, photo_validated_ok, updated_at)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12, now())
      ON CONFLICT (sku) DO UPDATE SET
        name = EXCLUDED.name,
        category = EXCLUDED.category,
@@ -122,6 +137,7 @@ export async function upsertProductFromImport(row: {
        notes = EXCLUDED.notes,
        status = EXCLUDED.status,
        error_message = EXCLUDED.error_message,
+       photo_validated_ok = EXCLUDED.photo_validated_ok,
        updated_at = now()`,
     [
       row.sku,
@@ -135,6 +151,7 @@ export async function upsertProductFromImport(row: {
       row.notes,
       status,
       row.photoInvalidReason ?? null,
+      row.photoValidatedOk,
     ],
   );
 

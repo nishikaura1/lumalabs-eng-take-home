@@ -26,6 +26,12 @@ export const config = {
   },
   db: {
     url: required("DATABASE_URL"),
+    // Most hosted Postgres (Railway, Neon, Render) requires SSL with a
+    // self-signed/intermediate cert that Node's default TLS validation
+    // rejects — a common first-deploy failure. Off by default for local/
+    // plain Postgres; set DATABASE_SSL=require once pointed at a real host.
+    ssl:
+      process.env.DATABASE_SSL === "require" ? { rejectUnauthorized: false } : undefined,
   },
   s3: {
     bucket: required("S3_BUCKET_NAME"),
