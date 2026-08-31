@@ -59,10 +59,21 @@ export async function runNotifierTick(adapter: ChatAdapter): Promise<void> {
   }
 }
 
+/**
+ * setTimeout-chained, not setInterval — see the identical fix and reasoning
+ * in worker.ts's startWorkerLoop. Same class of bug, lower-stakes here
+ * (notifier ticks are faster), but worth being consistent rather than
+ * leaving a second copy of a bug already found and fixed once.
+ */
 export function startNotifierLoop(adapter: ChatAdapter): void {
-  setInterval(() => {
-    runNotifierTick(adapter).catch((e) => console.error("[notifier] tick error:", e));
-  }, config.notifier.pollIntervalMs);
+  const loop = () => {
+    runNotifierTick(adapter)
+      .catch((e) => console.error("[notifier] tick error:", e))
+      .finally(() => {
+        setTimeout(loop, config.notifier.pollIntervalMs);
+      });
+  };
+  setTimeout(loop, config.notifier.pollIntervalMs);
   console.log(
     `[notifier] polling every ${config.notifier.pollIntervalMs}ms, ` +
       `work hours ${config.workHours.startHour}:00-${config.workHours.endHour}:00 ` +

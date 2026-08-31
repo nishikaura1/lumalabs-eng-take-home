@@ -163,10 +163,30 @@ async function generateAndScreenVariant(
   }
 }
 
+/**
+ * Deliberately setTimeout-chained, not setInterval — a tick only gets
+ * scheduled `pollIntervalMs` after the PREVIOUS one fully finishes.
+ *
+ * Found live: with setInterval, a tick fires every pollIntervalMs
+ * regardless of whether the last one finished, and product generation
+ * (three sequential Luma calls, ~10-30s each) routinely takes longer than
+ * that. Overlapping ticks each claim up to batchSize more products on top
+ * of whatever's still in flight from prior ticks, so true concurrent Luma
+ * load grew well past the intended batchSize=3 ceiling — straight into
+ * Luma's account-wide 10-concurrent-generation limit, which is what
+ * actually produced the 429s a 16-product import hit in practice. This
+ * chain guarantees at most one tick (and so at most `batchSize` concurrent
+ * Luma calls from this process) in flight at any time.
+ */
 export function startWorkerLoop(adapter: ChatAdapter): void {
-  setInterval(() => {
-    runWorkerTick(adapter).catch((e) => console.error("[worker] tick error:", e));
-  }, config.worker.pollIntervalMs);
+  const loop = () => {
+    runWorkerTick(adapter)
+      .catch((e) => console.error("[worker] tick error:", e))
+      .finally(() => {
+        setTimeout(loop, config.worker.pollIntervalMs);
+      });
+  };
+  setTimeout(loop, config.worker.pollIntervalMs);
   console.log(
     `[worker] polling every ${config.worker.pollIntervalMs}ms, batch size ${config.worker.batchSize}`,
   );
