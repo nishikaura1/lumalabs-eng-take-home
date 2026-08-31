@@ -8,6 +8,7 @@ import {
   getGeneration,
   getMetrics,
   getPendingReviewList,
+  requeueAllFailed,
   requeueProduct,
   statusCounts,
   undecideGeneration,
@@ -73,7 +74,8 @@ async function handleCommand(adapter: ChatAdapter, event: CommandEvent): Promise
           "• /status — where things stand right now.\n" +
           "• /review — everything still waiting on a decision, oldest first.\n" +
           "• /export — get an updated catalog CSV with statuses + approved links.\n" +
-          "• /redo SKU — re-queue a product whose shots were all rejected.",
+          "• /redo SKU — re-queue a product whose shots were all rejected or errored.\n" +
+          "• /redo all — re-queue everything currently in that state at once.",
       );
       return;
 
@@ -153,16 +155,27 @@ async function handleCommand(adapter: ChatAdapter, event: CommandEvent): Promise
         await adapter.sendText(READ_ONLY_NOTICE);
         return;
       }
-      const sku = event.args.trim().toUpperCase();
-      if (!sku) {
-        await adapter.sendText("Usage: /redo SKU (e.g. /redo HG-002)");
+      const arg = event.args.trim().toUpperCase();
+      if (!arg) {
+        await adapter.sendText("Usage: /redo SKU (e.g. /redo HG-002), or /redo all to retry everything that failed.");
         return;
       }
-      const ok = await requeueProduct(sku);
+
+      if (arg === "ALL") {
+        const skus = await requeueAllFailed();
+        await adapter.sendText(
+          skus.length > 0
+            ? `Re-queued ${skus.length} product(s): ${skus.join(", ")}`
+            : "Nothing in a redo-able state right now.",
+        );
+        return;
+      }
+
+      const ok = await requeueProduct(arg);
       await adapter.sendText(
         ok
-          ? `${sku} re-queued for generation.`
-          : `${sku} isn't in a redo-able state (must be needs_redo or error).`,
+          ? `${arg} re-queued for generation.`
+          : `${arg} isn't in a redo-able state (must be needs_redo or error).`,
       );
       return;
     }

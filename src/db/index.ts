@@ -426,6 +426,21 @@ export async function requeueProduct(sku: string): Promise<boolean> {
   return (rowCount ?? 0) > 0;
 }
 
+/**
+ * Bulk recovery for a systemic failure that errors out many products at
+ * once (found live: a rate-limit issue took out 6 of 16 products in one
+ * import) -- redoing each individually doesn't scale to a real 40-product
+ * drop. Returns the SKUs actually requeued, for the reply message.
+ */
+export async function requeueAllFailed(): Promise<string[]> {
+  const { rows } = await pool.query<{ sku: string }>(
+    `UPDATE products SET status = 'queued', error_message = NULL, updated_at = now()
+     WHERE status IN ('needs_redo', 'error')
+     RETURNING sku`,
+  );
+  return rows.map((r) => r.sku).sort();
+}
+
 export interface PendingReviewItem {
   id: number;
   sku: string;
