@@ -60,6 +60,25 @@ CREATE TABLE IF NOT EXISTS generations (
 );
 
 CREATE INDEX IF NOT EXISTS idx_generations_sku ON generations(sku);
+-- One-time cleanup, ahead of the unique index below: this runs unconditionally
+-- on every boot (see migrate()), so it must be safe to run against a database
+-- that already has duplicates *or* one that's already clean (no-op either way).
+-- Found live: production already had two 'pending' rows for the same
+-- (sku, variant_index) from before reclaimStuckGenerating() was fixed to
+-- delete orphaned unposted generations -- so the CREATE UNIQUE INDEX below
+-- failed outright on every boot (23505), crash-looping the whole app.
+-- Keep whichever duplicate is already posted_to_chat_at (Ellie may already
+-- have a live Approve/Reject message pointing at that row's chat_message_ref
+-- -- deleting it would orphan her button), tie-broken by most recent id;
+-- drop the rest before the index is asked to enforce uniqueness on them.
+DELETE FROM generations g USING (
+  SELECT id, ROW_NUMBER() OVER (
+    PARTITION BY sku, variant_index
+    ORDER BY (posted_to_chat_at IS NOT NULL) DESC, id DESC
+  ) AS rn
+  FROM generations WHERE decision = 'pending'
+) ranked
+  WHERE g.id = ranked.id AND ranked.rn > 1;
 -- Defense-in-depth against the crash-duplication bug (see reclaimStuckGenerating
 -- in db/index.ts): at most one PENDING generation per (sku, variant_index) at a
 -- time. Scoped to decision='pending' only -- not a full unique constraint --
