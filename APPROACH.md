@@ -1,5 +1,11 @@
 # Approach
 
+## Deployed, live
+
+- **Product**: [lumalabs-eng-take-home-production-cb4e.up.railway.app](https://lumalabs-eng-take-home-production-cb4e.up.railway.app) — Railway, real Postgres, real R2 storage, long-polling Telegram bot. Not a demo build; this is the same code running against real credentials that everything in this doc describes.
+- **Chat workspace**: [t.me/+4WKv-w4frwZjNjAx](https://t.me/+4WKv-w4frwZjNjAx) — join and try `/status`, `/review`, `/export` yourself. Ellie is the sole writer by design (see Assumptions), so everyone else — including anyone joining via this link — is read-only: you can watch and pull status, but can't approve/reject/undo/redo/import. That's not a demo restriction, it's the actual permission model.
+- See `SETUP.md` for how this was stood up from scratch, including the real issues hit along the way.
+
 ## What I built, and why
 
 Ellie's actual bottleneck was never generation quality — it was that requests sat in a spreadsheet column for months because "get a photographer" only happens 2-3 times a year. So the build is a straight pipeline from **Shot Idea text → styled photo → Ellie's phone**, with everything else in service of that:
