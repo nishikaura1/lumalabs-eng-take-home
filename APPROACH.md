@@ -31,15 +31,19 @@ Ellie's actual bottleneck was never generation quality — it was that requests 
 ## Scope ledger
 
 **In:**
-- Chat-driven CSV import (idempotent by SKU, photo-URL validated and cached, duplicate-SKU detection)
-- Luma `image_edit` generation with real 429 retry/backoff (found live, not theoretical)
+- Chat-driven CSV import (idempotent by SKU, photo-URL validated and cached, duplicate-SKU detection) — verified live to correctly distinguish a genuinely new drop (5 new Shot Ideas queued) from a re-send of unchanged rows (35 correctly skipped, not re-processed)
+- Luma `image_edit` generation with real 429 retry/backoff, and correctly-bounded worker concurrency (the `setTimeout`-chain fix — see "what breaks first")
 - Quality pre-screen with one bounded retry
 - Full approve/reject/undo/redo flow, two-step reject-reason picker, export-locked undo
-- Work-hours-gated notifications; generation runs independently, 24/7
+- **Notifications grouped per product**, not flat FIFO across everyone's candidates — found live that mixing variants from different products in one stream reads as a jumble; fixed to post one product's full set together before moving to the next
+- **Bulk recovery** (`/redo all`) for when a systemic issue errors out several products at once, not just one-at-a-time recovery
+- **Export surfaces the actual failure reason** (`error_message`), not just a status label — found live that "6 errors" with no explanation isn't actionable for Ellie or Maya
+- Work-hours-gated notifications; generation runs independently, 24/7, and self-heals anything stuck mid-flight from a crash/redeploy on the next boot
 - Backlog throttle tying generation pace to review capacity
 - Critical-failure alerting (systemic, not per-product) — separate from and explicitly *not* a budget-alert system
 - Spend tracking that survives partial failure (the `luma_spend_log`, added after a real storage outage showed spend was going untracked when a paid generation never made it to the DB)
 - The `ChatAdapter` interface + Console/Telegram (deployed) + Slack/Discord (built, tested, not deployed)
+- `SETUP.md` — real setup steps and troubleshooting from actually standing this up, not a hypothetical handoff doc
 
 **Out — cut by value, not by running out of time:**
 - **Real Google Drive integration.** The manual step already works for this team; building OAuth+Drive API for a non-broken step isn't where the day should go.
@@ -58,7 +62,9 @@ Ellie's actual bottleneck was never generation quality — it was that requests 
 
 ## Unit economics
 
-**Per image:** $0.0434 (Luma `uni-1`, `image_edit`). Quality pre-screen adds a fraction of a cent (Claude Haiku vision call) — negligible next to generation cost.
+**Per image:** $0.0434 (Luma `uni-1`, `image_edit`), matching real spend observed live ($1.48 across 34 stored images during testing). Quality pre-screen adds a fraction of a cent (Claude Haiku vision call) — negligible next to generation cost.
+
+**Wasted spend is tracked, not just successful spend.** `/status` reports it separately whenever it's nonzero — a Luma call is billed the moment it succeeds, before upload or screening, both of which can still fail afterward. Found live: a storage outage meant paid-for images were going completely untracked because the old design only recorded cost after a successful upload. That gap is closed; the honest number now includes money spent with nothing to show for it, not just the number that looks good.
 
 **Per approved product** (3 variants generated per pass, the common case): **≈$0.13 and ≈1–3 minutes of machine time** (three sequential Luma calls, each ~10–30s including polling, observed directly against the live API — not estimated). **Ellie's actual attention time is the smaller number**: roughly 15–45 seconds of taps per product, once the shots are ready. That gap — minutes of machine time versus seconds of her time — is the entire point of the build: what used to take a photographer weeks now costs her under a minute of phone time per product.
 
@@ -70,7 +76,7 @@ Ellie's actual bottleneck was never generation quality — it was that requests 
 ## What breaks first under pressure
 
 1. **Ellie's own throughput**, not the software — see above. This is the honest answer, not a deflection.
-2. **Luma's 10-concurrent-generation cap**, confirmed live. At meaningful scale this throttles wall-clock delivery regardless of how well our own retry/backoff behaves.
-3. **Single-instance deployment, no redundancy.** If the process crashes, generation and notification stop until the host restarts it. Railway restarts automatically, but there's a real gap in between — no queue durability check on resume beyond what Postgres already guarantees.
-4. **Disk/storage headroom on whatever host runs storage**, if self-hosting rather than a managed bucket — found live during local testing (a MinIO instance backed by a nearly-full disk silently broke uploads well after the Luma spend had already happened). Real infra needs real monitoring on this, not just "it worked in dev."
-5. **No automated regression coverage on core business logic.** The `ChatAdapter` layer has real unit tests; `worker.ts`, the CSV importer, and the DB layer are validated by live testing this session, not a test suite — a future change could regress something today's manual testing already covers without anyone noticing until it's live again.
+2. **Luma's 10-concurrent-generation cap, confirmed live** — but the sharper finding is that we *self-inflicted* a collision with it first. Both the worker and notifier loops originally used `setInterval`, which fires every poll interval regardless of whether the previous tick finished; since one product's generation (three sequential Luma calls) routinely takes longer than the 15s poll interval, ticks overlapped and true concurrent Luma load ran well past the intended `batchSize=3` — straight into Luma's real ceiling. Fixed by chaining `setTimeout` instead, so at most one tick is ever in flight. The cap itself is still real and worth negotiating with Luma before a 10x rollout, but our own client-side concurrency is now correctly bounded rather than accidentally unbounded.
+3. **Single-instance deployment, no redundancy.** If the process crashes, generation and notification stop until the host restarts it. Partially mitigated since writing this: any product stuck mid-`generating` at the moment of a crash/redeploy now self-heals on the next boot (`reclaimStuckGenerating()`) — found necessary live, on an actual Railway redeploy. What's still true: there's a gap between crash and restart with nothing running, and no self-alerting if the process fails to boot at all (bad env var, unreachable DB) — the bot can't page anyone about its own failure to start. Railway's own deploy-failure notifications are the real safety net for that specific case, not something worth re-building in-app.
+4. **Disk/storage headroom on whatever host runs storage**, if self-hosting rather than a managed bucket — found live during local testing (a MinIO instance backed by a nearly-full disk silently broke uploads well after the Luma spend had already happened, and that spend was invisible in `/status` until the `luma_spend_log` fix). Production uses R2, a managed bucket, so this specific failure mode doesn't apply to the deployed instance — but it's exactly the kind of thing "it worked in dev" hides until it doesn't.
+5. **No automated regression coverage on core business logic.** The `ChatAdapter` layer has real unit tests (54 passing); `worker.ts`, the CSV importer, and the DB layer are validated by live testing against real Telegram/Luma/Postgres/R2, not a test suite. That live testing is what actually found the tick-overlap bug, the stuck-`generating` gap, the notifier interleaving-by-product bug, and the invisible-spend-on-storage-failure bug — real value, but it's manual, not a regression net. A future change could reintroduce any of those without anyone noticing until it's live again.
