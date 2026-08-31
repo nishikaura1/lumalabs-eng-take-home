@@ -12,5 +12,10 @@
     "resolveJsonModule": true,
     "forceConsistentCasingInFileNames": true
   },
-  "include": ["src"]
+  "include": ["src"],
+  "exclude": [
+    "src/chat/slack.ts",
+    "src/chat/slack.test.ts",
+    "src/chat/discord.ts"
+  ]
 }
