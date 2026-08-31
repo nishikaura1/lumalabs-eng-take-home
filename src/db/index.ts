@@ -453,19 +453,36 @@ export interface UnpostedGeneration {
   quality_reason: string | null;
 }
 
-/** What the notifier should send next, oldest first, capped to `limit` per tick. */
-export async function getUnpostedGenerations(
-  limit: number,
-): Promise<UnpostedGeneration[]> {
+/**
+ * The next PRODUCT's full set of unposted candidates, oldest product first
+ * — never a mix of variants from different products. A flat "oldest N
+ * generations" query would interleave candidates from whichever products
+ * happened to finish generating around the same time, which reads as a
+ * jumble in chat rather than "here's HG-002's shots, then HG-005's." The
+ * notifier calls this in a loop, posting one product's group at a time,
+ * so the trickle Ellie sees lines up with how she actually reviews: one
+ * shot idea at a time.
+ */
+export async function getNextUnpostedProductGroup(): Promise<UnpostedGeneration[]> {
+  const { rows: skuRows } = await pool.query<{ sku: string }>(
+    `SELECT g.sku, min(g.created_at) as oldest
+     FROM generations g
+     WHERE g.decision = 'pending' AND g.posted_to_chat_at IS NULL AND g.s3_key IS NOT NULL
+     GROUP BY g.sku
+     ORDER BY oldest ASC
+     LIMIT 1`,
+  );
+  const sku = skuRows[0]?.sku;
+  if (!sku) return [];
+
   const { rows } = await pool.query<UnpostedGeneration>(
     `SELECT g.id, g.sku, p.name, p.shot_idea, g.variant_index, g.s3_key,
             g.quality_passed, g.quality_reason
      FROM generations g
      JOIN products p ON p.sku = g.sku
-     WHERE g.decision = 'pending' AND g.posted_to_chat_at IS NULL AND g.s3_key IS NOT NULL
-     ORDER BY g.created_at ASC
-     LIMIT $1`,
-    [limit],
+     WHERE g.sku = $1 AND g.decision = 'pending' AND g.posted_to_chat_at IS NULL AND g.s3_key IS NOT NULL
+     ORDER BY g.variant_index ASC`,
+    [sku],
   );
   return rows;
 }
