@@ -35,6 +35,7 @@ export async function buildExportCsv(): Promise<string> {
         "Shot Idea": p.shot_idea,
         Notes: p.notes ?? "",
         Status: p.status,
+        "Error Detail": p.error_message ?? "",
         "Approved Image URLs": urls.join(" ; "),
       };
     }),
