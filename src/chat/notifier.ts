@@ -2,38 +2,40 @@ import { config } from "../config.js";
 import { getUnpostedGenerations, markPosted } from "../db/index.js";
 import { signedUrlFor } from "../storage/s3.js";
 import { isWorkHours } from "../util/workhours.js";
-import { sendGeneratedShot, sendNotifierHeader } from "./bot.js";
+import type { ChatAdapter } from "./types.js";
 
 /**
  * This is the work-hours gate: generation (worker.ts) runs continuously,
  * but Ellie is only ever pinged inside config.workHours. Outside that
  * window this is a no-op and ready shots simply queue as status='generated'
  * — nothing is lost, it just waits for the next tick where isWorkHours()
- * is true.
+ * is true. Platform-agnostic: takes whatever ChatAdapter index.ts wires up.
  */
-export async function runNotifierTick(): Promise<void> {
+export async function runNotifierTick(adapter: ChatAdapter): Promise<void> {
   if (!isWorkHours()) return;
 
   const items = await getUnpostedGenerations(config.notifier.batchSize);
   if (items.length === 0) return;
 
-  await sendNotifierHeader(items.length);
+  await adapter.sendText(
+    `🔔 ${items.length} new shot${items.length === 1 ? "" : "s"} ready for review:`,
+  );
 
   for (const item of items) {
     try {
       const imageUrl = await signedUrlFor(item.s3_key, 3600);
-      const message = await sendGeneratedShot({
-        imageUrl,
+      const ref = await adapter.sendGeneratedShot({
+        generationId: item.id,
         sku: item.sku,
         variantIndex: item.variant_index,
-        generationId: item.id,
         shotIdea: item.shot_idea,
+        imageUrl,
         // Shown anyway after a failed retry (see worker.ts) — not hidden,
         // but Ellie gets the heads-up instead of finding out cold.
         qualityNote:
           item.quality_passed === false ? `⚠️ auto-check: ${item.quality_reason}` : undefined,
       });
-      await markPosted(item.id, message.message_id);
+      await markPosted(item.id, ref);
     } catch (e) {
       // Leave it unposted — it'll be retried on the next tick rather than
       // silently lost.
@@ -42,9 +44,9 @@ export async function runNotifierTick(): Promise<void> {
   }
 }
 
-export function startNotifierLoop(): void {
+export function startNotifierLoop(adapter: ChatAdapter): void {
   setInterval(() => {
-    runNotifierTick().catch((e) => console.error("[notifier] tick error:", e));
+    runNotifierTick(adapter).catch((e) => console.error("[notifier] tick error:", e));
   }, config.notifier.pollIntervalMs);
   console.log(
     `[notifier] polling every ${config.notifier.pollIntervalMs}ms, ` +

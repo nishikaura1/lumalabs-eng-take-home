@@ -29,7 +29,9 @@ CREATE TABLE IF NOT EXISTS generations (
   variant_index       INT NOT NULL,
   luma_generation_id  TEXT,
   s3_key              TEXT,
-  telegram_message_id BIGINT,
+  -- Opaque, adapter-minted ref (see src/chat/types.ts MessageRef) -- not
+  -- assumed to be a Telegram-shaped numeric id, so any ChatAdapter can use it.
+  chat_message_ref   TEXT,
   -- NULL until the notifier actually sends it (gated by work hours).
   posted_to_chat_at   TIMESTAMPTZ,
   -- pending | approved | rejected
@@ -69,3 +71,7 @@ ALTER TABLE generations ADD COLUMN IF NOT EXISTS exported_at TIMESTAMPTZ;
 ALTER TABLE generations ADD COLUMN IF NOT EXISTS quality_passed BOOLEAN;
 ALTER TABLE generations ADD COLUMN IF NOT EXISTS quality_reason TEXT;
 ALTER TABLE products ADD COLUMN IF NOT EXISTS photo_validated_ok BOOLEAN;
+-- Platform-agnostic rename, done pre-launch with no real deployment/data to
+-- migrate anywhere yet -- see src/chat/types.ts MessageRef.
+ALTER TABLE generations ADD COLUMN IF NOT EXISTS chat_message_ref TEXT;
+ALTER TABLE generations DROP COLUMN IF EXISTS telegram_message_id;

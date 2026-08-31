@@ -6,10 +6,10 @@ import {
   markProductStatus,
   type Product,
 } from "./db/index.js";
+import type { ChatAdapter } from "./chat/types.js";
 import { generateStyledShot } from "./luma/client.js";
 import { screenImage } from "./quality/screen.js";
 import { signedUrlFor, uploadGeneratedImage } from "./storage/s3.js";
-import { sendCriticalAlert } from "./telegram/bot.js";
 
 // Consecutive fully-failed ticks — distinguishes "one bad product" (normal,
 // silent, visible via /status) from "something systemic is broken" (API key,
@@ -20,11 +20,11 @@ let criticalAlertSent = false;
 /**
  * One pass: claim queued products, generate N variants each, store them.
  * Runs continuously regardless of the clock — only *notifying* Ellie of new
- * shots is gated by work hours (see telegram/notifier.ts). This keeps shots
+ * shots is gated by work hours (see chat/notifier.ts). This keeps shots
  * ready and waiting the moment she comes online instead of making her wait
  * on generation too.
  */
-export async function runWorkerTick(): Promise<void> {
+export async function runWorkerTick(adapter: ChatAdapter): Promise<void> {
   const products = await claimQueuedProducts(
     config.worker.batchSize,
     config.worker.maxPendingReviews,
@@ -44,11 +44,13 @@ export async function runWorkerTick(): Promise<void> {
       !criticalAlertSent
     ) {
       criticalAlertSent = true;
-      await sendCriticalAlert(
-        `Generation has failed for ${consecutiveFailedTicks} batch(es) in a row ` +
-          `(every product, not just one) — likely an API key, network, or storage ` +
-          `problem rather than a bad Shot Idea. Check the logs.`,
-      ).catch((e) => console.error("[worker] failed to send critical alert:", e));
+      await adapter
+        .sendCriticalAlert(
+          `Generation has failed for ${consecutiveFailedTicks} batch(es) in a row ` +
+            `(every product, not just one) — likely an API key, network, or storage ` +
+            `problem rather than a bad Shot Idea. Check the logs.`,
+        )
+        .catch((e) => console.error("[worker] failed to send critical alert:", e));
     }
   }
 }
@@ -137,9 +139,9 @@ async function generateAndScreenVariant(
   }
 }
 
-export function startWorkerLoop(): void {
+export function startWorkerLoop(adapter: ChatAdapter): void {
   setInterval(() => {
-    runWorkerTick().catch((e) => console.error("[worker] tick error:", e));
+    runWorkerTick(adapter).catch((e) => console.error("[worker] tick error:", e));
   }, config.worker.pollIntervalMs);
   console.log(
     `[worker] polling every ${config.worker.pollIntervalMs}ms, batch size ${config.worker.batchSize}`,

@@ -48,7 +48,7 @@ export interface Generation {
   variant_index: number;
   luma_generation_id: string | null;
   s3_key: string | null;
-  telegram_message_id: number | null;
+  chat_message_ref: string | null;
   posted_to_chat_at: Date | null;
   decision: "pending" | "approved" | "rejected";
   reject_reason: string | null;
@@ -390,7 +390,7 @@ export interface PendingReviewItem {
   name: string;
   variant_index: number;
   created_at: Date;
-  telegram_message_id: number | null;
+  chat_message_ref: string | null;
 }
 
 /**
@@ -401,7 +401,7 @@ export interface PendingReviewItem {
  */
 export async function getPendingReviewList(): Promise<PendingReviewItem[]> {
   const { rows } = await pool.query<PendingReviewItem>(
-    `SELECT g.id, g.sku, p.name, g.variant_index, g.created_at, g.telegram_message_id
+    `SELECT g.id, g.sku, p.name, g.variant_index, g.created_at, g.chat_message_ref
      FROM generations g
      JOIN products p ON p.sku = g.sku
      WHERE g.decision = 'pending' AND g.posted_to_chat_at IS NOT NULL
@@ -449,12 +449,12 @@ export async function getUnpostedGenerations(
 /** Marks a generation as delivered; once every variant for its SKU is posted, the product moves to awaiting_approval. */
 export async function markPosted(
   id: number,
-  telegramMessageId: number,
+  chatMessageRef: string,
 ): Promise<void> {
   const { rows } = await pool.query<{ sku: string }>(
-    `UPDATE generations SET posted_to_chat_at = now(), telegram_message_id = $2
+    `UPDATE generations SET posted_to_chat_at = now(), chat_message_ref = $2
      WHERE id = $1 RETURNING sku`,
-    [id, telegramMessageId],
+    [id, chatMessageRef],
   );
   const sku = rows[0].sku;
 

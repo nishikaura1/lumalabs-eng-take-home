@@ -1,8 +1,9 @@
 import http from "node:http";
+import { TelegramChatAdapter } from "./chat/telegram.js";
+import { wireChatAdapter } from "./chat/orchestrator.js";
+import { startNotifierLoop } from "./chat/notifier.js";
 import { config } from "./config.js";
 import { migrate } from "./db/index.js";
-import { bot } from "./telegram/bot.js";
-import { startNotifierLoop } from "./telegram/notifier.js";
 import { startWorkerLoop } from "./worker.js";
 
 async function main() {
@@ -18,12 +19,22 @@ async function main() {
     })
     .listen(config.port, () => console.log(`[http] health check on :${config.port}`));
 
-  startWorkerLoop();
-  startNotifierLoop();
-
-  await bot.start({
-    onStart: () => console.log("[telegram] bot polling started"),
+  // The only place a concrete ChatAdapter is constructed. Everything else
+  // (worker, notifier, orchestrator) depends on the ChatAdapter interface,
+  // not on Telegram specifically — swapping this one line is what "runs
+  // universally" actually means in practice. See src/chat/types.ts and
+  // docs/chat-adapter-proposals/SYNTHESIS.md.
+  const adapter = new TelegramChatAdapter({
+    botToken: config.telegram.botToken,
+    chatId: config.telegram.chatId,
   });
+
+  wireChatAdapter(adapter);
+  startWorkerLoop(adapter);
+  startNotifierLoop(adapter);
+
+  await adapter.start();
+  console.log("[chat] adapter started (telegram)");
 }
 
 main().catch((e) => {
