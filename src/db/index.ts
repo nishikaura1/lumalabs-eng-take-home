@@ -17,6 +17,24 @@ export async function migrate(): Promise<void> {
   await pool.query(sql);
 }
 
+/**
+ * 'generating' only ever means "a live worker process claimed this and is
+ * actively working through it right now" — nothing sets it except
+ * claimQueuedProducts, and nothing should ever observe it at the moment a
+ * fresh process boots. If a row is sitting in 'generating' at startup, the
+ * process that claimed it is gone (crashed, redeployed, killed) and the
+ * work was lost mid-flight — found live on a real Railway redeploy, where
+ * products stuck here just sat frozen forever with no automatic recovery.
+ * Safe to unconditionally requeue: worst case is a redundant Luma call on
+ * something that was actually still fine, never data loss.
+ */
+export async function reclaimStuckGenerating(): Promise<number> {
+  const { rowCount } = await pool.query(
+    `UPDATE products SET status = 'queued', updated_at = now() WHERE status = 'generating'`,
+  );
+  return rowCount ?? 0;
+}
+
 export type ProductStatus =
   | "no_shot_idea"
   | "queued"

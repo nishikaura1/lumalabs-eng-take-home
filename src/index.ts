@@ -3,12 +3,20 @@ import { TelegramChatAdapter } from "./chat/telegram.js";
 import { wireChatAdapter } from "./chat/orchestrator.js";
 import { startNotifierLoop } from "./chat/notifier.js";
 import { config } from "./config.js";
-import { migrate } from "./db/index.js";
+import { migrate, reclaimStuckGenerating } from "./db/index.js";
 import { startWorkerLoop } from "./worker.js";
 
 async function main() {
   await migrate();
   console.log("[db] schema ready");
+
+  // Every boot, not just recovery from a crash — a normal redeploy kills
+  // the process mid-flight just as easily. See reclaimStuckGenerating's
+  // doc comment; found live on a real Railway redeploy.
+  const reclaimed = await reclaimStuckGenerating();
+  if (reclaimed > 0) {
+    console.log(`[db] reclaimed ${reclaimed} product(s) stuck in 'generating' from a prior run`);
+  }
 
   // Minimal health-check surface for the host (Railway/Fly/etc). We use
   // Telegram long polling, not webhooks, so this is all the HTTP we need.
