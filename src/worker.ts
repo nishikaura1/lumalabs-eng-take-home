@@ -3,6 +3,8 @@ import {
   claimQueuedProducts,
   createGeneration,
   getRecentRejectReasons,
+  logLumaSpend,
+  markLumaSpendOutcome,
   markProductStatus,
   type Product,
 } from "./db/index.js";
@@ -105,37 +107,59 @@ async function generateAndScreenVariant(
   for (let attempt = 1; attempt <= 2; attempt++) {
     const gen = await generateStyledShot({ photoUrl: product.photo_url, prompt });
 
-    const imgRes = await fetch(gen.outputUrl);
-    const bytes = Buffer.from(await imgRes.arrayBuffer());
-
-    const s3Key = await uploadGeneratedImage({
+    // Logged the instant the Luma call succeeds — money is spent at this
+    // point regardless of what happens next. Found live: a storage failure
+    // used to throw before any record of the spend existed anywhere.
+    const spendLogId = await logLumaSpend({
       sku: product.sku,
       variantIndex: variant,
-      bytes,
+      lumaGenerationId: gen.id,
+      costUsd: gen.costUsd,
     });
 
-    const screenUrl = await signedUrlFor(s3Key, 300); // just long enough for the screening call to fetch it
-    const verdict = await screenImage({
-      referencePhotoUrl: product.photo_url,
-      generatedImageUrl: screenUrl,
-    });
+    try {
+      const imgRes = await fetch(gen.outputUrl);
+      const bytes = Buffer.from(await imgRes.arrayBuffer());
 
-    const isFinalAttempt = attempt === 2 || verdict.passed;
-    if (isFinalAttempt) {
-      await createGeneration({
+      const s3Key = await uploadGeneratedImage({
         sku: product.sku,
-        variant_index: variant,
-        luma_generation_id: gen.id,
-        s3_key: s3Key,
-        cost_usd: gen.costUsd,
-        quality_passed: verdict.passed,
-        quality_reason: verdict.reason,
+        variantIndex: variant,
+        bytes,
       });
-      return;
-    }
 
-    console.log(`[worker] ${product.sku} v${variant} flagged (${verdict.reason}), retrying once`);
-    prompt = `${basePrompt}. Make sure the product itself keeps the same shape, color, and material as the reference photo, and the image is clean and in focus.`;
+      const screenUrl = await signedUrlFor(s3Key, 300); // just long enough for the screening call to fetch it
+      const verdict = await screenImage({
+        referencePhotoUrl: product.photo_url,
+        generatedImageUrl: screenUrl,
+      });
+
+      const isFinalAttempt = attempt === 2 || verdict.passed;
+      if (isFinalAttempt) {
+        await createGeneration({
+          sku: product.sku,
+          variant_index: variant,
+          luma_generation_id: gen.id,
+          s3_key: s3Key,
+          cost_usd: gen.costUsd,
+          quality_passed: verdict.passed,
+          quality_reason: verdict.reason,
+        });
+        await markLumaSpendOutcome(spendLogId, "stored");
+        return;
+      }
+
+      await markLumaSpendOutcome(spendLogId, "discarded_retry");
+      console.log(`[worker] ${product.sku} v${variant} flagged (${verdict.reason}), retrying once`);
+      prompt = `${basePrompt}. Make sure the product itself keeps the same shape, color, and material as the reference photo, and the image is clean and in focus.`;
+    } catch (e) {
+      // Money already spent (see logLumaSpend above); the image itself is
+      // lost. Record that honestly rather than letting it vanish, then
+      // propagate — processProduct's catch still marks the product 'error'.
+      await markLumaSpendOutcome(spendLogId, "storage_failed").catch((logErr) =>
+        console.error(`[worker] failed to mark spend outcome for ${spendLogId}:`, logErr),
+      );
+      throw e;
+    }
   }
 }
 

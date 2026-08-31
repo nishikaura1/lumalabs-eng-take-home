@@ -331,13 +331,26 @@ export class TelegramChatAdapter implements ChatAdapter {
   async sendGeneratedShot(content: GeneratedShotContent): Promise<MessageRef> {
     const caption = buildInitialShotCaption(content);
     const keyboard = shotStateToKeyboard(content.generationId, { kind: "decide" })!;
-    // Passing the URL directly (not bytes) — Telegram's own servers fetch
-    // it. See docs/chat-adapter-proposals/telegram.md for why this doesn't
-    // generalize to every platform.
-    const message = await this.bot.api.sendPhoto(this.chatId, content.imageUrl, {
-      caption,
-      reply_markup: { inline_keyboard: keyboard },
-    });
+    // Fetches `imageUrl` itself and uploads the bytes, rather than handing
+    // Telegram the URL to fetch server-side. That's a deliberate departure
+    // from docs/chat-adapter-proposals/telegram.md's original proposal
+    // (which assumed Telegram-side fetch-by-URL): this adapter should work
+    // regardless of whether the storage backend is internet-reachable from
+    // Telegram's servers specifically — true for a real public S3 bucket,
+    // false for a local MinIO instance in dev, and not something this
+    // adapter should have to assume either way. Costs one extra download
+    // (bytes were already fetched once by worker.ts, then discarded; this
+    // is the notifier fetching them again to actually deliver them).
+    const imgRes = await fetch(content.imageUrl);
+    if (!imgRes.ok) {
+      throw new Error(`sendGeneratedShot: failed to fetch imageUrl (${imgRes.status})`);
+    }
+    const bytes = Buffer.from(await imgRes.arrayBuffer());
+    const message = await this.bot.api.sendPhoto(
+      this.chatId,
+      new InputFile(bytes, `${content.sku}-v${content.variantIndex}.jpg`),
+      { caption, reply_markup: { inline_keyboard: keyboard } },
+    );
     return encodeMessageRef(message.message_id, content.generationId);
   }
 

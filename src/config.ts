@@ -36,6 +36,12 @@ export const config = {
   s3: {
     bucket: required("S3_BUCKET_NAME"),
     region: process.env.AWS_REGION ?? "us-west-2",
+    // Unset in production (real AWS S3). Set to an S3-compatible endpoint
+    // (e.g. http://localhost:9000) for local dev against MinIO -- forcePathStyle
+    // is required by MinIO/most S3-compatible services (virtual-hosted-style
+    // buckets need real DNS, which a local endpoint doesn't have).
+    endpoint: process.env.S3_ENDPOINT,
+    forcePathStyle: process.env.S3_ENDPOINT !== undefined,
   },
   worker: {
     pollIntervalMs: Number(process.env.WORKER_POLL_INTERVAL_MS ?? 15_000),

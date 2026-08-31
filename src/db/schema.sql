@@ -62,6 +62,26 @@ CREATE TABLE IF NOT EXISTS generations (
 CREATE INDEX IF NOT EXISTS idx_generations_sku ON generations(sku);
 CREATE INDEX IF NOT EXISTS idx_products_status ON products(status);
 
+-- Every successful Luma call, logged the moment it succeeds -- independent
+-- of whether storage/screening ever completes. Found live: a storage
+-- failure (see chat-adapter integration testing) threw before
+-- createGeneration ever ran, so real spend was invisible to /status. This
+-- table is the actual source of truth for total spend; `generations` only
+-- ever represents deliverable candidates.
+CREATE TABLE IF NOT EXISTS luma_spend_log (
+  id                  SERIAL PRIMARY KEY,
+  sku                 TEXT NOT NULL,
+  variant_index       INT NOT NULL,
+  luma_generation_id  TEXT NOT NULL,
+  cost_usd            NUMERIC(10, 4) NOT NULL,
+  -- pending (just spent, outcome not known yet) | stored (became a real
+  -- generation) | discarded_retry (quality-screen retry, superseded) |
+  -- storage_failed (spent, image lost -- e.g. the disk-full incident)
+  outcome             TEXT NOT NULL DEFAULT 'pending',
+  created_at          TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_luma_spend_log_sku ON luma_spend_log(sku);
+
 -- Additive, idempotent migrations for columns added after the first deploy.
 ALTER TABLE generations ADD COLUMN IF NOT EXISTS reject_reason TEXT;
 ALTER TABLE generations ADD COLUMN IF NOT EXISTS decided_by_user_id BIGINT;

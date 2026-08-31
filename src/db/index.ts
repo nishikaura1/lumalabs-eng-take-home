@@ -250,6 +250,30 @@ export async function createGeneration(g: {
   return rows[0].id;
 }
 
+/** Logged the instant a Luma call succeeds -- before upload/screening, which can still fail after the money's already spent. */
+export async function logLumaSpend(entry: {
+  sku: string;
+  variantIndex: number;
+  lumaGenerationId: string;
+  costUsd: number;
+}): Promise<number> {
+  const { rows } = await pool.query<{ id: number }>(
+    `INSERT INTO luma_spend_log (sku, variant_index, luma_generation_id, cost_usd)
+     VALUES ($1,$2,$3,$4) RETURNING id`,
+    [entry.sku, entry.variantIndex, entry.lumaGenerationId, entry.costUsd],
+  );
+  return rows[0].id;
+}
+
+export type LumaSpendOutcome = "stored" | "discarded_retry" | "storage_failed";
+
+export async function markLumaSpendOutcome(
+  id: number,
+  outcome: LumaSpendOutcome,
+): Promise<void> {
+  await pool.query(`UPDATE luma_spend_log SET outcome = $2 WHERE id = $1`, [id, outcome]);
+}
+
 export async function getGeneration(id: number): Promise<Generation | null> {
   const { rows } = await pool.query<Generation>(
     `SELECT * FROM generations WHERE id = $1`,
@@ -487,6 +511,10 @@ export interface Metrics {
   pending: number;
   approvalRate: number | null; // of decided (approved+rejected), not pending
   totalSpendUsd: number;
+  /** Spend on generations that never became a deliverable candidate -- a
+   *  storage failure, most notably -- a subset of totalSpendUsd, surfaced
+   *  separately since it's real money with nothing to show for it. */
+  wastedSpendUsd: number;
   costPerApprovedUsd: number | null;
   topRejectReasons: { reason: string; count: number }[];
   qualityFlagged: number;
@@ -506,26 +534,35 @@ export interface Metrics {
  * Surfaced via /status. See APPROACH.md for the pilot-batch process this feeds.
  */
 export async function getMetrics(): Promise<Metrics> {
-  const { rows } = await pool.query<{
-    decision: string;
-    count: string;
-    cost_sum: string | null;
-  }>(
-    `SELECT decision, count(*), sum(cost_usd) as cost_sum FROM generations GROUP BY decision`,
+  const { rows } = await pool.query<{ decision: string; count: string }>(
+    `SELECT decision, count(*) FROM generations GROUP BY decision`,
   );
 
   let approved = 0;
   let rejected = 0;
   let pending = 0;
-  let totalSpendUsd = 0;
   for (const r of rows) {
     const n = Number(r.count);
-    totalSpendUsd += Number(r.cost_sum ?? 0);
     if (r.decision === "approved") approved = n;
     else if (r.decision === "rejected") rejected = n;
     else pending = n;
   }
   const decided = approved + rejected;
+
+  // luma_spend_log, not generations.cost_usd, is the real source of truth
+  // for spend -- it's logged the instant a Luma call succeeds, before
+  // upload/screening can still fail with the money already spent (see
+  // schema.sql comment; found live during storage testing).
+  const { rows: spendRows } = await pool.query<{ outcome: string; cost_sum: string | null }>(
+    `SELECT outcome, sum(cost_usd) as cost_sum FROM luma_spend_log GROUP BY outcome`,
+  );
+  let totalSpendUsd = 0;
+  let wastedSpendUsd = 0;
+  for (const r of spendRows) {
+    const sum = Number(r.cost_sum ?? 0);
+    totalSpendUsd += sum;
+    if (r.outcome === "storage_failed") wastedSpendUsd += sum;
+  }
 
   const { rows: reasonRows } = await pool.query<{
     reject_reason: string;
@@ -572,6 +609,7 @@ export async function getMetrics(): Promise<Metrics> {
     pending,
     approvalRate: decided > 0 ? approved / decided : null,
     totalSpendUsd,
+    wastedSpendUsd,
     costPerApprovedUsd: approved > 0 ? totalSpendUsd / approved : null,
     qualityFlagged,
     flaggedRejectRate: flaggedDecided > 0 ? flaggedRejected / flaggedDecided : null,

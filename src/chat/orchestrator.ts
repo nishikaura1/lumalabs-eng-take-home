@@ -47,9 +47,20 @@ function isEllie(actorId: string): boolean {
  * index.ts constructs.
  */
 export function wireChatAdapter(adapter: ChatAdapter): void {
-  adapter.onCommand((event) => handleCommand(adapter, event));
-  adapter.onDecision((event) => handleDecision(adapter, event));
-  adapter.onCsvUpload((event) => handleCsvUpload(adapter, event));
+  adapter.onCommand((event) => {
+    console.log(`[chat] command /${event.name} "${event.args}" from ${event.actor.displayName} (${event.actor.id})`);
+    return handleCommand(adapter, event);
+  });
+  adapter.onDecision((event) => {
+    console.log(
+      `[chat] decision ${event.action} gen=${event.generationId} from ${event.actor.displayName} (${event.actor.id})`,
+    );
+    return handleDecision(adapter, event);
+  });
+  adapter.onCsvUpload((event) => {
+    console.log(`[chat] csv upload "${event.filename}" from ${event.actor.displayName} (${event.actor.id})`);
+    return handleCsvUpload(adapter, event);
+  });
 }
 
 async function handleCommand(adapter: ChatAdapter, event: CommandEvent): Promise<void> {
@@ -109,7 +120,10 @@ async function handleCommand(adapter: ChatAdapter, event: CommandEvent): Promise
           line("Needs redo (all rejected)", "needs_redo"),
           line("Errors", "error"),
           "",
-          `💵 Spend so far: $${metrics.totalSpendUsd.toFixed(2)} (${metrics.totalGenerated} images)`,
+          `💵 Spend so far: $${metrics.totalSpendUsd.toFixed(2)} (${metrics.totalGenerated} images)` +
+            (metrics.wastedSpendUsd > 0
+              ? ` — includes $${metrics.wastedSpendUsd.toFixed(2)} lost to storage failures`
+              : ""),
           `Approval rate: ${pct(metrics.approvalRate)} · Cost per approved shot: ${usd(metrics.costPerApprovedUsd)}`,
           reasonLines ? `Top reject reasons:\n${reasonLines}` : "",
           metrics.qualityFlagged > 0

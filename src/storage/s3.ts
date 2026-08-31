@@ -10,7 +10,11 @@ import { config } from "../config.js";
 // works for them today. Swapping this for real Google Drive is a documented
 // follow-up (see APPROACH.md, Scope Ledger) — not built now to keep the day
 // focused on the loop that's actually broken (steps 3-4).
-const client = new S3Client({ region: config.s3.region });
+const client = new S3Client({
+  region: config.s3.region,
+  endpoint: config.s3.endpoint,
+  forcePathStyle: config.s3.forcePathStyle,
+});
 
 export async function uploadGeneratedImage(opts: {
   sku: string;
