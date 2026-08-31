@@ -2,6 +2,47 @@
 
 Everything below is what it actually takes to stand this up from scratch — written from doing it live, not from a script. Nothing here is theoretical; every step (and every troubleshooting note) reflects something that actually happened during this build.
 
+## Code structure, if you're reading this to understand the code rather than deploy it
+
+```
+src/
+  index.ts, worker.ts, config.ts   Entrypoint, the generation loop, env loading — start here
+  db/
+    schema.sql                      Every table, with inline comments on why each column exists
+    index.ts                        All persistence — every query the app makes lives here
+  chat/
+    types.ts                        The ChatAdapter interface — read this before any adapter file
+    orchestrator.ts                 Platform-agnostic business logic (commands, decisions, CSV
+                                     upload) wired onto whatever adapter index.ts constructs
+    notifier.ts                     Work-hours-gated, per-product-grouped posting loop
+    telegram.ts + telegram.test.ts  The ONE adapter actually deployed to production
+    console.ts + console.test.ts    Credential-free reference adapter, used for adapter-contract tests
+    discord.ts, discord-protocol.ts,
+    slack.ts, slack-blocks.ts       Built and independently tested against the same interface,
+                                     proving portability -- NOT wired into the deployed app (see
+                                     APPROACH.md's scope ledger for why). discord.ts/slack.ts won't
+                                     typecheck without their real dependency installed -- that's
+                                     intentional (tsconfig.json excludes them from the default
+                                     build); discord-protocol.ts and slack-blocks.ts are the
+                                     dependency-free logic underneath and do compile/test normally.
+  luma/client.ts                    Luma image_edit API, 429 retry/backoff
+  quality/screen.ts                 Vision pre-screen before a shot reaches chat
+  storage/s3.ts                     S3/R2 upload + signed URLs
+  ingest/csv.ts, export.ts,
+       validate.ts                  CSV import (idempotent), export, photo URL validation
+  util/time.ts, workhours.ts        Display formatting, the work-hours gate
+
+docs/chat-adapter-proposals/        Design-process artifacts: 4 independent platform proposals
+                                     + SYNTHESIS.md, the reconciliation into types.ts. Read this
+                                     if you want the reasoning behind the ChatAdapter shape, not
+                                     just the shape itself.
+
+scripts/                            Reusable dev utilities (not scratch files) -- each has an
+                                     npm script; see package.json.
+```
+
+The one-sentence map: **`index.ts` wires one concrete `ChatAdapter` (Telegram) to `orchestrator.ts` (business logic) and starts `worker.ts` (generation) + `chat/notifier.ts` (posting) as independent loops that only ever touch the database and the adapter interface — never each other directly.**
+
 ## Prerequisites
 
 - A Telegram account

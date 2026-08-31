@@ -2,6 +2,14 @@
  * Discord implementation of ChatAdapter (src/chat/types.ts), via discord.js
  * (Interactions API + gateway).
  *
+ * NOT WIRED INTO THE DEPLOYED PRODUCT. Built and independently tested
+ * against the same interface Telegram implements, to prove the
+ * architecture is genuinely portable -- this customer only needs one
+ * platform (Telegram, deployed) and explicitly doesn't want more than one
+ * surface. See APPROACH.md's scope ledger. Excluded from the default
+ * tsconfig build for exactly this reason (discord-protocol.ts, the
+ * dependency-free logic underneath, is NOT excluded and does compile/test).
+ *
  * Assumed dependency (not yet added to package.json — see the take-home
  * coordinator note): "discord.js": "^14.16.3".
  *

@@ -1,3 +1,5 @@
+> **This is the original challenge brief** — unmodified, as instructed. If you're looking for the actual product: **[APPROACH.md](APPROACH.md)** (what was built, why, live URL), **[ASSUMPTIONS.md](ASSUMPTIONS.md)** (open questions and calls made), **[SETUP.md](SETUP.md)** (how to run/deploy it, code structure, troubleshooting). Original brief follows below.
+
 # Luma Take-Home — Forward Deployed Engineer
 
 Modern engineering is about directing leverage — tools, judgment, taste — toward real outcomes. This take-home is designed around that.
