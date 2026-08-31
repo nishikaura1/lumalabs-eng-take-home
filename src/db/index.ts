@@ -258,20 +258,45 @@ export async function getGeneration(id: number): Promise<Generation | null> {
   return rows[0] ?? null;
 }
 
-/** Record a decision, and roll the parent product to approved once enough variants are in. */
+/**
+ * Record a decision, and roll the parent product to approved once enough
+ * variants are in.
+ *
+ * Idempotency is enforced HERE, atomically, via `WHERE decision = 'pending'`
+ * — not just by the caller checking first (bot.ts does that too, as a fast
+ * UX path, but a check-then-write in the caller is a race under redelivery).
+ * This surfaced as a real gap during the multi-platform ChatAdapter design:
+ * Telegram never redelivers a callback, so the caller-side check alone
+ * happened to be enough; Slack retries an interaction it didn't get a fast
+ * ack for, so two concurrent deliveries of the same tap must not both apply.
+ * `applied: false` tells the caller this call was a no-op (already decided
+ * by a prior delivery) so it can skip re-announcing the outcome.
+ */
 export async function decideGeneration(
   id: number,
   decision: "approved" | "rejected",
   decidedBy: { userId: number; username: string },
   rejectReason?: string,
-): Promise<{ sku: string; approvedCount: number }> {
+): Promise<{ sku: string; approvedCount: number; applied: boolean }> {
   const { rows } = await pool.query<{ sku: string }>(
     `UPDATE generations
      SET decision = $2, decided_at = now(), reject_reason = $3,
          decided_by_user_id = $4, decided_by_username = $5
-     WHERE id = $1 RETURNING sku`,
+     WHERE id = $1 AND decision = 'pending'
+     RETURNING sku`,
     [id, decision, rejectReason ?? null, decidedBy.userId, decidedBy.username],
   );
+
+  if (rows.length === 0) {
+    const existing = await getGeneration(id);
+    if (!existing) throw new Error(`decideGeneration: generation ${id} not found`);
+    const { rows: countRows } = await pool.query<{ count: string }>(
+      `SELECT count(*) FROM generations WHERE sku = $1 AND decision = 'approved'`,
+      [existing.sku],
+    );
+    return { sku: existing.sku, approvedCount: Number(countRows[0].count), applied: false };
+  }
+
   const sku = rows[0].sku;
   await recomputeProductStatus(sku);
 
@@ -279,7 +304,7 @@ export async function decideGeneration(
     `SELECT count(*) FROM generations WHERE sku = $1 AND decision = 'approved'`,
     [sku],
   );
-  return { sku, approvedCount: Number(countRows[0].count) };
+  return { sku, approvedCount: Number(countRows[0].count), applied: true };
 }
 
 export type UndecideResult =
@@ -300,14 +325,19 @@ export async function undecideGeneration(id: number): Promise<UndecideResult> {
   if (!gen || gen.decision === "pending") return { ok: false, reason: "not_found" };
   if (gen.exported_at) return { ok: false, reason: "already_exported" };
 
+  // Same atomic-guard reasoning as decideGeneration: WHERE decision != 'pending'
+  // here, not just the pre-check above, so a duplicate/concurrent Undo tap
+  // can't race a second one back to pending after the first already succeeded.
   const { rows } = await pool.query<{ sku: string }>(
     `UPDATE generations
      SET decision = 'pending', decided_at = NULL, reject_reason = NULL,
          decided_by_user_id = NULL, decided_by_username = NULL
-     WHERE id = $1
+     WHERE id = $1 AND decision != 'pending'
      RETURNING sku`,
     [id],
   );
+  if (rows.length === 0) return { ok: false, reason: "not_found" };
+
   const sku = rows[0].sku;
   await recomputeProductStatus(sku);
   return { ok: true, sku };
