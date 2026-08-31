@@ -281,8 +281,12 @@ async function handleCsvUpload(adapter: ChatAdapter, event: CsvUploadEvent): Pro
     await adapter.sendText(
       [
         `Import done: ${result.totalRows} rows.`,
-        `${result.newOrChanged} new/changed → queued for generation.`,
-        `${result.skipped} already up to date, skipped.`,
+        `${result.newOrChanged} new, or with a changed Shot Idea/Photo → queued for generation.`,
+        // Any other field on a matched SKU (Price, Name, Category, Color,
+        // Material, Notes) is still saved to this row -- it just doesn't
+        // trigger a re-spend on its own, since none of those reach the
+        // generated image. "Skipped" means no re-generation, not "ignored".
+        `${result.skipped} matched an existing row with no Shot Idea/Photo change — other fields (if any) saved, generation skipped.`,
         result.photoInvalid
           ? `⚠️ ${result.photoInvalid} row(s) have a broken/non-image Photo link — parked as errors, not queued (no spend). Fix the link and re-send the CSV to retry.`
           : "",

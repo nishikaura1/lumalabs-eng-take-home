@@ -161,10 +161,23 @@ export async function upsertProductFromImport(row: {
   const hasShotIdea = row.shot_idea.trim().length > 0;
   const prev = existing.rows[0];
   const shotIdeaChanged = !prev || prev.shot_idea !== row.shot_idea;
+  // photo_url is the actual reference image handed to Luma's image_edit --
+  // a corrected/replacement photo is exactly as generation-relevant as a
+  // changed Shot Idea, even if the wording is unchanged. Found live: a
+  // re-import that only swapped Photo was silently skipped as "up to date"
+  // because only shot_idea was ever checked here.
+  const photoUrlChanged = !prev || prev.photo_url !== row.photo_url;
 
   // Don't re-enqueue (and re-spend) on a row we've already processed unless
-  // the Shot Idea text itself changed, or it never had one before.
-  const wouldEnqueue = hasShotIdea && shotIdeaChanged;
+  // something that actually feeds the generation changed -- the Shot Idea
+  // text, the reference photo, or it never had a Shot Idea before. Price,
+  // Name, Category, Color, Material, and Notes are saved (see the UPDATE
+  // below) but deliberately don't trigger a re-spend on their own: none of
+  // them reach the Luma prompt or the reference image (see worker.ts), so
+  // re-generating on a price bump would just be wasted spend. The import
+  // summary message must stay honest about this split -- see handleCsvUpload.
+  const somethingGenerationRelevantChanged = shotIdeaChanged || photoUrlChanged;
+  const wouldEnqueue = hasShotIdea && somethingGenerationRelevantChanged;
   const shouldEnqueue = wouldEnqueue && row.photoValidatedOk;
   const status: ProductStatus = !row.photoValidatedOk
     ? "error"
