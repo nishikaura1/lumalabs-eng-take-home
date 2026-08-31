@@ -69,7 +69,7 @@ async function handleCommand(adapter: ChatAdapter, event: CommandEvent): Promise
       await adapter.sendText(
         "Styled Shots bot online.\n\n" +
           "• Send me a catalog .csv to import new products / a new drop.\n" +
-          "• I'll post generated shots here for approve/reject.\n" +
+          "• I'll post generated shots here for approve/reject — in sections, one shot idea at a time, so it's clear which photos go together.\n" +
           "• /status — where things stand right now.\n" +
           "• /review — everything still waiting on a decision, oldest first.\n" +
           "• /export — get an updated catalog CSV with statuses + approved links.\n" +
