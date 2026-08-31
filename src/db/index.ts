@@ -25,14 +25,47 @@ export async function migrate(): Promise<void> {
  * process that claimed it is gone (crashed, redeployed, killed) and the
  * work was lost mid-flight — found live on a real Railway redeploy, where
  * products stuck here just sat frozen forever with no automatic recovery.
- * Safe to unconditionally requeue: worst case is a redundant Luma call on
- * something that was actually still fine, never data loss.
+ *
+ * FOUND VIA CODE REVIEW, FIXED HERE: the original version just requeued the
+ * product and claimed "worst case is a redundant Luma call, never data
+ * loss" — that was false. processProduct always regenerates starting at
+ * variant 1 with no check for generations already inserted before the
+ * crash, so a product that got 2 of 3 variants done before dying would
+ * come back with 5 generation rows, not 3: real duplicate Luma spend, and
+ * a swollen review pool that can push approvedCount past APPROVALS_NEEDED.
+ * Since a 'generating' product has never reached 'generated' — nothing
+ * has been posted to chat yet (posted_to_chat_at IS NULL for all of its
+ * rows) — any generations already inserted for it are safe to delete
+ * outright. Their Luma spend stays recorded independently in
+ * luma_spend_log regardless, so nothing about the cost story is lost,
+ * only the orphaned half-finished candidates are.
  */
 export async function reclaimStuckGenerating(): Promise<number> {
-  const { rowCount } = await pool.query(
-    `UPDATE products SET status = 'queued', updated_at = now() WHERE status = 'generating'`,
-  );
-  return rowCount ?? 0;
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const { rows } = await client.query<{ sku: string }>(
+      `SELECT sku FROM products WHERE status = 'generating'`,
+    );
+    if (rows.length > 0) {
+      const skus = rows.map((r) => r.sku);
+      await client.query(
+        `DELETE FROM generations WHERE sku = ANY($1) AND posted_to_chat_at IS NULL`,
+        [skus],
+      );
+      await client.query(
+        `UPDATE products SET status = 'queued', updated_at = now() WHERE sku = ANY($1)`,
+        [skus],
+      );
+    }
+    await client.query("COMMIT");
+    return rows.length;
+  } catch (e) {
+    await client.query("ROLLBACK");
+    throw e;
+  } finally {
+    client.release();
+  }
 }
 
 export type ProductStatus =
@@ -495,12 +528,26 @@ export interface UnpostedGeneration {
  * notifier calls this in a loop, posting one product's group at a time,
  * so the trickle Ellie sees lines up with how she actually reviews: one
  * shot idea at a time.
+ *
+ * FOUND VIA CODE REVIEW, FIXED HERE: the original version selected on
+ * generations state alone (decision/posted_to_chat_at/s3_key), with no
+ * check that the PRODUCT had actually finished generating. worker.ts
+ * inserts each variant's row the moment that single variant completes,
+ * but only flips the product to 'generated' after all of them do — a gap
+ * that routinely exceeds one notifier poll interval. A tick landing in
+ * that gap would post whatever variants happened to be done so far as
+ * "the group," then post the rest under a second header once they
+ * finished — the exact fragmentation this function's whole point is to
+ * prevent. Requiring products.status = 'generated' means a product is
+ * only ever selected once every one of its variants is actually ready.
  */
 export async function getNextUnpostedProductGroup(): Promise<UnpostedGeneration[]> {
   const { rows: skuRows } = await pool.query<{ sku: string }>(
     `SELECT g.sku, min(g.created_at) as oldest
      FROM generations g
+     JOIN products p ON p.sku = g.sku
      WHERE g.decision = 'pending' AND g.posted_to_chat_at IS NULL AND g.s3_key IS NOT NULL
+       AND p.status = 'generated'
      GROUP BY g.sku
      ORDER BY oldest ASC
      LIMIT 1`,
@@ -514,6 +561,7 @@ export async function getNextUnpostedProductGroup(): Promise<UnpostedGeneration[
      FROM generations g
      JOIN products p ON p.sku = g.sku
      WHERE g.sku = $1 AND g.decision = 'pending' AND g.posted_to_chat_at IS NULL AND g.s3_key IS NOT NULL
+       AND p.status = 'generated'
      ORDER BY g.variant_index ASC`,
     [sku],
   );

@@ -60,6 +60,13 @@ CREATE TABLE IF NOT EXISTS generations (
 );
 
 CREATE INDEX IF NOT EXISTS idx_generations_sku ON generations(sku);
+-- Defense-in-depth against the crash-duplication bug (see reclaimStuckGenerating
+-- in db/index.ts): at most one PENDING generation per (sku, variant_index) at a
+-- time. Scoped to decision='pending' only -- not a full unique constraint --
+-- because /redo legitimately creates a new round of rows reusing the same
+-- variant_index numbers as a prior, already-decided round.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_generations_sku_variant_pending
+  ON generations(sku, variant_index) WHERE decision = 'pending';
 CREATE INDEX IF NOT EXISTS idx_products_status ON products(status);
 
 -- Every successful Luma call, logged the moment it succeeds -- independent
